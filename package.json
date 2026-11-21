@@ -44,13 +44,16 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Clipper-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "Clipper-Portable.${ext}"
     },
     "mac": {
-      "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] }
-      ],
-      "category": "public.app-category.video"
+      "target": "dmg",
+      "category": "public.app-category.video",
+      "artifactName": "Clipper-${arch}.${ext}"
     }
   }
 }

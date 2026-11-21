@@ -2,6 +2,19 @@
 
 Десктопное приложение для Windows и Mac: режет стримы на клипы по 20, 30 или 60 секунд.
 
+## Скачать
+
+Свежая сборка из `main` (обновляется после каждого коммита, все файлы также на странице [Releases](../../releases/tag/latest)):
+
+| Система | Файл |
+| --- | --- |
+| Windows, установщик | [Clipper-Setup.exe](../../releases/download/latest/Clipper-Setup.exe) |
+| Windows, без установки | [Clipper-Portable.exe](../../releases/download/latest/Clipper-Portable.exe) |
+| Mac с чипом Apple (M1 и новее) | [Clipper-arm64.dmg](../../releases/download/latest/Clipper-arm64.dmg) |
+| Mac с процессором Intel | [Clipper-x64.dmg](../../releases/download/latest/Clipper-x64.dmg) |
+
+Пока сборка идёт (около 5–10 минут после коммита), ссылки могут не открываться. Состояние смотри на вкладке Actions.
+
 ## Что умеет
 
 - **По звуку**: находит крики, смех и всплески громкости относительно обычного уровня стрима и режет клип вокруг каждого. Клипы не пересекаются.
@@ -30,7 +43,7 @@ npm run dist:win   # на Windows
 npm run dist:mac   # на Mac
 ```
 
-Через GitHub Actions: вкладка **Actions → Build → Run workflow** соберёт установщики для обеих систем, готовые файлы будут в артефактах запуска. Если создать тег `v0.1.0`, файлы прикрепятся к релизу.
+Через GitHub Actions сборка запускается сама при каждом пуше в `main` (или вручную: **Actions → Build → Run workflow**). Готовые файлы публикуются в релиз `latest`. Если создать тег вида `v0.1.0`, появится отдельный релиз с этой версией.
 
 ## Проверка движка
 

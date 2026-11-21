@@ -2,6 +2,7 @@ name: Build
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -16,7 +17,11 @@ jobs:
         include:
           - os: windows-latest
             script: dist:win
+          # ffmpeg-static качает бинарник под архитектуру раннера,
+          # поэтому каждая архитектура Mac собирается на своём раннере.
           - os: macos-latest
+            script: dist:mac
+          - os: macos-15-intel
             script: dist:mac
     runs-on: ${{ matrix.os }}
     steps:
@@ -24,7 +29,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm install
       - run: npm test
       - run: npm run ${{ matrix.script }}
@@ -37,10 +41,29 @@ jobs:
             dist/*.exe
             dist/*.dmg
           if-no-files-found: error
-      - name: Прикрепить к релизу
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: |
-            dist/*.exe
-            dist/*.dmg
+          path: files
+          merge-multiple: true
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la files
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            gh release create "$TAG" files/* --title "Clipper $TAG" --generate-notes
+          else
+            # Свежая сборка из main всегда лежит в релизе "latest".
+            gh release delete latest --cleanup-tag --yes || true
+            gh release create latest files/* \
+              --target "$GITHUB_SHA" \
+              --title "Clipper (последняя сборка)" \
+              --notes "Автоматическая сборка из main, коммит ${GITHUB_SHA::7}."
+          fi
