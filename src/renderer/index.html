@@ -29,7 +29,19 @@
           <span id="file-name" class="file-name"></span>
           <span id="file-meta" class="hint"></span>
         </div>
-        <button id="file-change" class="btn ghost" type="button">Сменить</button>
+        <div class="file-actions">
+          <button id="file-change" class="btn ghost" type="button">Сменить</button>
+          <button id="file-remove" class="btn ghost" type="button">Убрать</button>
+        </div>
+      </div>
+
+      <div id="remove-confirm" class="confirm" hidden role="group" aria-labelledby="remove-title">
+        <span id="remove-title">Это видео скачало приложение. Что сделать с файлом?</span>
+        <div class="confirm-actions">
+          <button id="remove-keep" class="btn ghost" type="button">Оставить на диске</button>
+          <button id="remove-trash" class="btn ghost danger" type="button">В корзину</button>
+          <button id="remove-cancel" class="btn ghost" type="button">Отмена</button>
+        </div>
       </div>
 
       <form id="url-form" class="url-row" autocomplete="off" novalidate>
@@ -60,6 +72,16 @@
         </div>
       </fieldset>
 
+      <fieldset class="field">
+        <legend>Формат кадра</legend>
+        <div class="seg n2">
+          <span class="thumb" aria-hidden="true"></span>
+          <label><input type="radio" name="orient" value="horizontal" checked><span>Горизонтальный</span></label>
+          <label><input type="radio" name="orient" value="vertical"><span>Вертикальный 9:16</span></label>
+        </div>
+        <p id="orient-hint" class="hint"></p>
+      </fieldset>
+
       <div id="count-field" class="field">
         <div class="field-row">
           <label for="count">Сколько клипов</label>
@@ -72,7 +94,7 @@
         <input id="fast" type="checkbox">
         <span>
           <span class="check-title">Быстрая нарезка</span>
-          <span class="hint">Без перекодирования: почти мгновенно, но начало клипа может сдвинуться на пару секунд</span>
+          <span id="fast-hint" class="hint"></span>
         </span>
       </label>
 

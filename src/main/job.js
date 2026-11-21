@@ -29,11 +29,11 @@ class Job {
   }
 
   // Запускает процесс до конца. onStdout / onStderr получают Buffer.
-  run(cmd, args, { onStdout, onStderr } = {}) {
+  run(cmd, args, { onStdout, onStderr, env } = {}) {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = this.spawn(cmd, args);
+        child = this.spawn(cmd, args, env ? { env: { ...process.env, ...env } } : {});
       } catch (err) {
         reject(err);
         return;

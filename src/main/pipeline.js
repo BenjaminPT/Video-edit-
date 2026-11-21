@@ -26,7 +26,9 @@ function validateOptions(opts) {
   if (!ALLOWED_LENGTHS.includes(opts.clipLen)) throw new Error('Длина клипа: 20, 30 или 60 секунд');
   const count = Number(opts.count);
   if (!Number.isInteger(count) || count < 1 || count > 60) throw new Error('Количество клипов: от 1 до 60');
-  return { ...opts, count, fast: Boolean(opts.fast) };
+  const orientation = opts.orientation === undefined ? 'horizontal' : opts.orientation;
+  if (orientation !== 'horizontal' && orientation !== 'vertical') throw new Error('Формат: горизонтальный или вертикальный');
+  return { ...opts, count, orientation, fast: Boolean(opts.fast) };
 }
 
 /**
@@ -69,6 +71,7 @@ async function runPipeline({ job, ffmpegPath, ffprobePath, options, onProgress }
     segments,
     outDir: opts.outDir,
     fast: opts.fast,
+    vertical: opts.orientation === 'vertical',
     onProgress: (value, done, total) =>
       onProgress({ stage: 'cut', value, label: `Режу клипы ${done} из ${total}` }),
   });

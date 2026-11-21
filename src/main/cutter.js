@@ -27,12 +27,24 @@ function uniqueDir(parent, name) {
   return dir;
 }
 
+// Вертикальный кадр 9:16: берём центральную полосу нужной ширины и растягиваем до 1080x1920.
+// Если исходник уже уже, чем 9:16, режем сверху и снизу. Размеры чётные, как требует h264.
+const VERTICAL_FILTER =
+  "crop='if(gt(a,9/16),trunc(ih*9/16/2)*2,iw)':'if(gt(a,9/16),ih,trunc(iw*16/9/2)*2)'," +
+  'scale=1080:1920:flags=lanczos,setsar=1';
+
+function lastLines(text, n = 3) {
+  return text.trim().split('\n').filter(Boolean).slice(-n).join(' | ');
+}
+
 /**
  * Режет сегменты по очереди.
  * fast = true: без перекодирования (мгновенно, но границы привязаны к ключевым кадрам).
  * fast = false: перекодирование h264/aac (медленнее, зато точно и работает везде).
+ * vertical = true: кадр 9:16 с обрезкой краёв; требует перекодирования, поэтому fast игнорируется.
  */
-async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, onProgress }) {
+async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, vertical = false, onProgress }) {
+  if (vertical) fast = false;
   const base = safeName(path.parse(input).name);
   const folder = uniqueDir(outDir, `${base}_clips`);
   const clips = [];
@@ -53,6 +65,7 @@ async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, onProg
     if (fast) {
       args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
     } else {
+      if (vertical) args.push('-vf', VERTICAL_FILTER);
       args.push(
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
         '-c:a', 'aac', '-b:a', '160k'
@@ -62,7 +75,7 @@ async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, onProg
 
     const { code, stderr } = await job.run(ffmpegPath, args);
     if (code !== 0) {
-      throw new Error(`Не удалось вырезать клип ${i + 1}: ` + (stderr.trim().split('\n').pop() || 'код ' + code));
+      throw new Error(`Не удалось вырезать клип ${i + 1}: ` + (lastLines(stderr) || 'код ' + code));
     }
     clips.push({ index: i + 1, start: seg.start, end: seg.end, file, score: seg.score });
     if (onProgress) onProgress((i + 1) / segments.length, i + 1, segments.length);
@@ -76,4 +89,4 @@ async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, onProg
   return { folder, clips };
 }
 
-module.exports = { cutClips, clock };
+module.exports = { cutClips, clock, VERTICAL_FILTER };

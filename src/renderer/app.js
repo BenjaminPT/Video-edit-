@@ -5,7 +5,9 @@ const api = window.clipper;
 
 const el = {
   drop: $('drop'), file: $('file'), fileName: $('file-name'), fileMeta: $('file-meta'),
-  fileChange: $('file-change'), urlForm: $('url-form'), url: $('url'), urlGo: $('url-go'),
+  fileChange: $('file-change'), fileRemove: $('file-remove'), confirm: $('remove-confirm'),
+  removeKeep: $('remove-keep'), removeTrash: $('remove-trash'), removeCancel: $('remove-cancel'),
+  orientHint: $('orient-hint'), fastHint: $('fast-hint'), urlForm: $('url-form'), url: $('url'), urlGo: $('url-go'),
   modeHint: $('mode-hint'), countField: $('count-field'), count: $('count'), countOut: $('count-out'),
   fast: $('fast'), outPath: $('out-path'), outChange: $('out-change'),
   run: $('run'), progress: $('progress'), progressLabel: $('progress-label'), progressPct: $('progress-pct'),
@@ -14,11 +16,20 @@ const el = {
   openFolder: $('open-folder'), copyTimes: $('copy-times'),
 };
 
-const state = { input: null, duration: 0, outDir: '', busy: false, last: null };
+const state = { input: null, duration: 0, outDir: '', busy: false, last: null, downloaded: false };
 
 const MODE_HINTS = {
   smart: 'Ищет крики, смех и всплески громкости, режет клип вокруг каждого',
   fixed: 'Режет всё видео подряд на равные куски',
+};
+
+const ORIENT_HINTS = {
+  horizontal: 'Кадр остаётся как в исходном видео',
+  vertical: 'Из центра кадра вырезается полоса 9:16, края слева и справа обрезаются. Клипы 1080×1920',
+};
+const FAST_HINTS = {
+  on: 'Без перекодирования: почти мгновенно, но начало клипа может сдвинуться на пару секунд',
+  vertical: 'Недоступно для вертикального формата: кадр нужно перекодировать',
 };
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -37,6 +48,7 @@ function human(sec) {
 }
 
 function getMode() { return document.querySelector('input[name="mode"]:checked').value; }
+function getOrient() { return document.querySelector('input[name="orient"]:checked').value; }
 function getLen() { return Number(document.querySelector('input[name="len"]:checked').value); }
 
 function setStatus(text, kind = '') {
@@ -58,6 +70,11 @@ function refresh() {
   el.modeHint.textContent = MODE_HINTS[getMode()];
   el.countField.hidden = !smart;
   el.countOut.textContent = el.count.value;
+  const vertical = getOrient() === 'vertical';
+  el.orientHint.textContent = ORIENT_HINTS[getOrient()];
+  el.fast.disabled = vertical;
+  el.fast.closest('.check').classList.toggle('disabled', vertical);
+  el.fastHint.textContent = vertical ? FAST_HINTS.vertical : FAST_HINTS.on;
   el.outPath.textContent = state.outDir;
   el.outPath.title = state.outDir;
   el.run.disabled = state.busy || !state.input || !state.outDir;
@@ -66,12 +83,16 @@ function refresh() {
   el.urlGo.disabled = state.busy;
   el.url.disabled = state.busy;
   el.fileChange.disabled = state.busy;
+  el.fileRemove.disabled = state.busy;
+  document.querySelectorAll('input[name="orient"]').forEach((i) => (i.disabled = state.busy));
   el.outChange.disabled = state.busy;
 }
 
-function setVideo({ file, duration, name }) {
+function setVideo({ file, duration, name, downloaded = false }) {
   state.input = file;
   state.duration = duration;
+  state.downloaded = downloaded;
+  el.confirm.hidden = true;
   el.drop.hidden = true;
   el.file.hidden = false;
   el.fileName.textContent = name;
@@ -85,8 +106,40 @@ function setVideo({ file, duration, name }) {
 async function loadFile(file) {
   const res = await api.probe(file);
   if (!res.ok) { setStatus(res.error, 'error'); return; }
-  setVideo({ file, duration: res.data.duration, name: res.data.name });
+  setVideo({ file, duration: res.data.duration, name: res.data.name, downloaded: res.data.downloaded });
 }
+
+// Убрать видео из приложения. Файл на диске трогаем только если его скачало приложение
+// и человек выбрал «В корзину».
+function clearVideo(message = '') {
+  state.input = null;
+  state.duration = 0;
+  state.downloaded = false;
+  state.last = null;
+  el.confirm.hidden = true;
+  el.file.hidden = true;
+  el.drop.hidden = false;
+  el.results.hidden = true;
+  setStatus(message);
+  refresh();
+}
+
+el.fileRemove.addEventListener('click', () => {
+  if (state.busy || !state.input) return;
+  if (state.downloaded) {
+    el.confirm.hidden = false;
+    el.removeKeep.focus();
+  } else {
+    clearVideo('Видео убрано из приложения. Файл на диске не тронут');
+  }
+});
+el.removeCancel.addEventListener('click', () => { el.confirm.hidden = true; el.fileRemove.focus(); });
+el.removeKeep.addEventListener('click', () => clearVideo('Видео убрано из приложения. Файл остался на диске'));
+el.removeTrash.addEventListener('click', async () => {
+  const res = await api.trash(state.input);
+  if (res.ok) clearVideo('Файл отправлен в корзину');
+  else setStatus(res.error, 'error');
+});
 
 function showProgress({ value, label }) {
   el.progress.hidden = false;
@@ -162,7 +215,7 @@ el.urlForm.addEventListener('submit', async (e) => {
   state.busy = false;
   hideProgress();
   if (res.ok) {
-    setVideo({ file: res.data.file, duration: res.data.duration, name: res.data.name });
+    setVideo({ file: res.data.file, duration: res.data.duration, name: res.data.name, downloaded: res.data.downloaded });
     el.url.value = '';
   } else if (!res.cancelled) {
     setStatus(res.error, 'error');
@@ -187,6 +240,7 @@ el.run.addEventListener('click', async () => {
     outDir: state.outDir,
     mode: getMode(),
     clipLen: getLen(),
+    orientation: getOrient(),
     count: Number(el.count.value),
     fast: el.fast.checked,
   });
@@ -254,7 +308,7 @@ el.copyTimes.addEventListener('click', async () => {
   }
 });
 
-document.querySelectorAll('input[name="mode"], input[name="len"]').forEach((i) => i.addEventListener('change', refresh));
+document.querySelectorAll('input[name="mode"], input[name="len"], input[name="orient"]').forEach((i) => i.addEventListener('change', refresh));
 el.count.addEventListener('input', refresh);
 
 (async function init() {

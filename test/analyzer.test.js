@@ -107,6 +107,52 @@ function near(actual, expected, tolerance, label) {
   });
   assert.strictEqual(smart.clips.length, 3);
 
+  // Вертикальный формат: клип 1080x1920, быстрая нарезка при этом игнорируется
+  const vert = await runPipeline({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe,
+    options: { input: source, outDir: path.join(tmp, 'outV'), mode: 'smart', clipLen: 20, count: 1, fast: true, orientation: 'vertical' },
+    onProgress: () => {},
+  });
+  assert.strictEqual(vert.clips.length, 1);
+  const dims = spawnSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', vert.clips[0].file], { encoding: 'utf8' });
+  assert.strictEqual(dims.stdout.trim(), '1080,1920', 'вертикальный клип должен быть 1080x1920, а не ' + dims.stdout.trim());
+  await assert.rejects(
+    runPipeline({ job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe, options: { input: source, outDir: tmp, mode: 'fixed', clipLen: 20, count: 3, orientation: 'diagonal' }, onProgress() {} }),
+    /Формат/
+  );
+
+  // Загрузчик на поддельном yt-dlp (только на Mac и Linux: на Windows нет sh).
+  const { downloadVideo, assertHttpUrl } = require('../src/main/downloader');
+  assert.throws(() => assertHttpUrl('file:///etc/passwd'), /http/);
+  assert.throws(() => assertHttpUrl('не ссылка'), /ссылку/);
+  if (process.platform !== 'win32') {
+    const fake = path.join(tmp, 'fake-ytdlp.sh');
+    fs.writeFileSync(fake, [
+      '#!/bin/sh',
+      'out=""',
+      'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; fi; shift; done',
+      'dir=$(dirname "$out")',
+      'echo data > "$dir/v123.mp4"',
+      'echo "CLP  50.0%"',
+      "printf 'TTL:\\320'", // первый байт буквы «П»
+      'sleep 0.3',
+      "printf '\\237 стрим\\n'", // второй байт, приходит отдельным куском
+      'if [ "$FAKE_PRINT_PATH" = "1" ]; then echo "$dir/v123.mp4"; fi',
+    ].join('\n') + '\n', { mode: 0o755 });
+    const toolset = { ytdlp: fake, dir: tmp };
+
+    process.env.FAKE_PRINT_PATH = '1';
+    const dlA = await downloadVideo({ job: new Job(), tools: toolset, url: 'https://www.twitch.tv/videos/1', outDir: path.join(tmp, 'dlA'), onProgress() {} });
+    assert.strictEqual(path.basename(dlA.file), 'v123.mp4');
+    assert.strictEqual(dlA.title, 'П стрим', 'название с кириллицей, разорванное между кусками, склеилось неверно: ' + dlA.title);
+
+    // yt-dlp не напечатал путь: берём свежий видеофайл из папки
+    process.env.FAKE_PRINT_PATH = '0';
+    const dlB = await downloadVideo({ job: new Job(), tools: toolset, url: 'https://www.twitch.tv/videos/2', outDir: path.join(tmp, 'dlB'), onProgress() {} });
+    assert.strictEqual(path.basename(dlB.file), 'v123.mp4');
+    delete process.env.FAKE_PRINT_PATH;
+  }
+
   // Проверка входных данных
   await assert.rejects(
     runPipeline({ job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe, options: { input: source, outDir: tmp, mode: 'fixed', clipLen: 45, count: 3 }, onProgress() {} }),

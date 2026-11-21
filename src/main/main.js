@@ -11,6 +11,8 @@ const { downloadVideo } = require('./downloader');
 
 let win = null;
 let currentJob = null;
+// Файлы, которые скачало само приложение. Только их разрешено отправлять в корзину.
+const downloaded = new Set();
 
 function createWindow() {
   win = new BrowserWindow({
@@ -99,7 +101,18 @@ handle('video:probe', async (input) => {
   if (!fs.existsSync(input) || !fs.statSync(input).isFile()) throw new Error('Файл не найден');
   const job = new Job();
   const duration = await probeDuration({ job, ffprobePath: tools.ffprobePath(), input });
-  return { duration, name: path.basename(input) };
+  return { duration, name: path.basename(input), downloaded: downloaded.has(input) };
+});
+
+// Убрать видео из приложения можно всегда (это делает интерфейс сам).
+// Этот обработчик нужен только для файла на диске и только для скачанного приложением:
+// оригиналы пользователя мы не трогаем. Файл уходит в корзину, а не стирается.
+handle('video:trash', async (file) => {
+  requireString(file, 'file');
+  if (!downloaded.has(file)) throw new Error('Приложение удаляет только те файлы, которые скачало само');
+  if (fs.existsSync(file)) await shell.trashItem(file);
+  downloaded.delete(file);
+  return true;
 });
 
 handle('video:download', async ({ url, outDir }) => {
@@ -109,7 +122,7 @@ handle('video:download', async ({ url, outDir }) => {
   try {
     send('job:progress', { stage: 'download', value: 0, label: 'Готовлю загрузчик' });
     const ytdlp = await tools.ensureYtDlp(app.getPath('userData'));
-    const file = await downloadVideo({
+    const { file, title } = await downloadVideo({
       job,
       tools: ytdlp,
       url,
@@ -117,7 +130,8 @@ handle('video:download', async ({ url, outDir }) => {
       onProgress: (value) => send('job:progress', { stage: 'download', value, label: 'Скачиваю видео' }),
     });
     const duration = await probeDuration({ job, ffprobePath: tools.ffprobePath(), input: file });
-    return { file, duration, name: path.basename(file) };
+    downloaded.add(file);
+    return { file, duration, name: title || path.basename(file), downloaded: true };
   } finally {
     endJob(job);
   }

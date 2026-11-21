@@ -2,8 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 
 const ANSI = /\u001b\[[0-9;]*m/g;
+const VIDEO_EXT = new Set(['.mp4', '.mkv', '.webm', '.mov', '.m4v', '.ts', '.flv', '.avi']);
 
 function assertHttpUrl(url) {
   let parsed;
@@ -18,57 +20,99 @@ function assertHttpUrl(url) {
   return parsed.toString();
 }
 
+// Самый свежий видеофайл, появившийся в папке после начала загрузки.
+// Запасной путь на случай, если yt-dlp не напечатал имя файла внятно.
+function newestVideoSince(dir, since) {
+  let best = null;
+  for (const name of fs.readdirSync(dir)) {
+    if (!VIDEO_EXT.has(path.extname(name).toLowerCase())) continue;
+    const full = path.join(dir, name);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch (_) {
+      continue;
+    }
+    if (!stat.isFile() || stat.mtimeMs < since - 2000) continue;
+    if (!best || stat.mtimeMs > best.mtime) best = { full, mtime: stat.mtimeMs };
+  }
+  return best && best.full;
+}
+
 /**
- * Скачивает видео по ссылке через yt-dlp и возвращает путь к файлу.
- * Ссылка передаётся отдельным аргументом после "--", оболочка не используется.
+ * Скачивает видео по ссылке через yt-dlp.
+ * Возвращает { file, title }. Ссылка идёт отдельным аргументом после "--",
+ * оболочка не используется.
+ *
+ * Имя файла делаем только из ASCII (id видео): название стрима может быть
+ * на любом языке с эмодзи, а Windows и ffmpeg с такими путями дружат хуже.
+ * Настоящее название берём отдельной строкой и показываем в интерфейсе.
  */
 async function downloadVideo({ job, tools, url, outDir, onProgress }) {
   const safeUrl = assertHttpUrl(url);
   fs.mkdirSync(outDir, { recursive: true });
+  const startedAt = Date.now();
 
   const args = [
     '--no-playlist',
-    '--windows-filenames',
+    '--restrict-filenames',
+    '--encoding', 'utf-8',
     '--newline',
     '--progress',
     '--progress-template', 'CLP %(progress._percent_str)s',
     '--no-simulate',
+    '--print', 'after_move:TTL:%(title)s',
     '--print', 'after_move:filepath',
     '-f', 'bv*[height<=1080]+ba/b[height<=1080]/b',
     '--merge-output-format', 'mp4',
     '--ffmpeg-location', tools.dir,
-    '-o', path.join(outDir, '%(title).100B [%(id)s].%(ext)s'),
+    '-o', path.join(outDir, '%(id)s.%(ext)s'),
     '--', safeUrl,
   ];
 
   let filePath = null;
+  let title = null;
+  const decoder = new StringDecoder('utf8'); // не рвёт многобайтные символы на границе кусков
   let buffer = '';
-  const onStdout = (chunk) => {
-    buffer += chunk.toString();
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop();
-    for (const raw of lines) {
-      const line = raw.replace(ANSI, '').trim();
-      if (!line) continue;
-      if (line.startsWith('CLP')) {
-        const m = /([\d.]+)%/.exec(line);
-        if (m && onProgress) onProgress(Math.min(1, parseFloat(m[1]) / 100));
-      } else if (path.isAbsolute(line)) {
-        filePath = line;
-      }
+
+  const handleLine = (raw) => {
+    const line = raw.replace(ANSI, '').trim();
+    if (!line) return;
+    if (line.startsWith('CLP')) {
+      const m = /([\d.]+)%/.exec(line);
+      if (m && onProgress) onProgress(Math.min(1, parseFloat(m[1]) / 100));
+    } else if (line.startsWith('TTL:')) {
+      title = line.slice(4).trim() || null;
+    } else if (path.isAbsolute(line)) {
+      filePath = line;
     }
   };
 
-  const { code, stderr } = await job.run(tools.ytdlp, args, { onStdout });
-  if (buffer.trim() && path.isAbsolute(buffer.trim())) filePath = buffer.trim();
+  const onStdout = (chunk) => {
+    buffer += decoder.write(chunk);
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop();
+    lines.forEach(handleLine);
+  };
+
+  const { code, stderr } = await job.run(tools.ytdlp, args, {
+    onStdout,
+    env: { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  });
+  handleLine(buffer + decoder.end());
+
   if (code !== 0) {
     const reason = stderr.trim().split('\n').filter(Boolean).pop() || 'код ' + code;
     throw new Error('Не удалось скачать видео: ' + reason.replace(/^ERROR:\s*/, ''));
   }
+
   if (!filePath || !fs.existsSync(filePath)) {
-    throw new Error('Видео скачалось, но файл не найден');
+    filePath = newestVideoSince(outDir, startedAt);
   }
-  return filePath;
+  if (!filePath) {
+    throw new Error('Видео скачалось, но файл не найден в папке ' + outDir);
+  }
+  return { file: filePath, title };
 }
 
-module.exports = { downloadVideo, assertHttpUrl };
+module.exports = { downloadVideo, assertHttpUrl, newestVideoSince };
