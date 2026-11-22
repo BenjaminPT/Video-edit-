@@ -141,9 +141,6 @@ legend, .field-label, .field-row label {
   .btn.danger:hover:not(:disabled) { color: var(--danger); background: var(--surface-2); }
 }
 
-.check.disabled { opacity: 0.5; cursor: not-allowed; }
-.check.disabled input { cursor: not-allowed; }
-
 .url-row { display: flex; gap: 8px; }
 .url-row input {
   flex: 1; min-width: 0; font: inherit; color: var(--text);
@@ -223,6 +220,7 @@ input[type="range"] {
 .results-list li:first-child { border-top: 0; }
 .results-list .idx { width: 24px; color: var(--muted); font-size: 13px; }
 .results-list .time { font-variant-numeric: tabular-nums; flex: 1; }
+.results-list .warn { color: var(--danger); font-size: 13px; }
 .results-list .score { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 @keyframes rise { to { opacity: 1; transform: translateY(0); } }
 

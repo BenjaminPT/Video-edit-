@@ -72,29 +72,19 @@
         </div>
       </fieldset>
 
-      <fieldset class="field">
-        <legend>Формат кадра</legend>
-        <div class="seg n2">
-          <span class="thumb" aria-hidden="true"></span>
-          <label><input type="radio" name="orient" value="horizontal" checked><span>Горизонтальный</span></label>
-          <label><input type="radio" name="orient" value="vertical"><span>Вертикальный 9:16</span></label>
-        </div>
-        <p id="orient-hint" class="hint"></p>
-      </fieldset>
-
       <div id="count-field" class="field">
         <div class="field-row">
           <label for="count">Сколько клипов</label>
-          <output id="count-out" for="count">10</output>
+          <output id="count-out" for="count">15</output>
         </div>
-        <input id="count" type="range" min="3" max="30" step="1" value="10">
+        <input id="count" type="range" min="3" max="100" step="1" value="15">
       </div>
 
       <label class="check">
         <input id="fast" type="checkbox">
         <span>
           <span class="check-title">Быстрая нарезка</span>
-          <span id="fast-hint" class="hint"></span>
+          <span class="hint">Видео без перекодирования: почти мгновенно, но начало клипа может сдвинуться на пару секунд. Звук обрабатывается всегда</span>
         </span>
       </label>
 

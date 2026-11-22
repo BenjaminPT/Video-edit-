@@ -1,22 +1,46 @@
 'use strict';
 
-const { computeLoudness, findHighlights, fixedSegments } = require('./analyzer');
+const { computeProfile, findHighlights, fixedSegments } = require('./analyzer');
 const { cutClips } = require('./cutter');
 
 const ALLOWED_LENGTHS = [20, 30, 60];
+const MAX_CLIPS = 200;
 
-async function probeDuration({ job, ffprobePath, input }) {
+/** Длительность и число аудиодорожек одним вызовом ffprobe. */
+async function probeMedia({ job, ffprobePath, input }) {
   let out = '';
   const { code, stderr } = await job.run(
     ffprobePath,
-    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input],
+    ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'json', input],
     { onStdout: (d) => (out += d.toString()) }
   );
-  const duration = parseFloat(out.trim());
+  let parsed = null;
+  try {
+    parsed = JSON.parse(out);
+  } catch (_) {
+    /* разберём ниже */
+  }
+  const duration = parsed && parsed.format ? parseFloat(parsed.format.duration) : NaN;
   if (code !== 0 || !Number.isFinite(duration) || duration <= 0) {
     throw new Error('Не удалось прочитать видео: ' + (stderr.trim().split('\n').pop() || 'неизвестный формат'));
   }
-  return duration;
+  const streams = (parsed && parsed.streams) || [];
+  return { duration, audioStreams: streams.filter((s) => s.codec_type === 'audio').length };
+}
+
+async function probeDuration(args) {
+  return (await probeMedia(args)).duration;
+}
+
+/**
+ * Слушает звук видео один раз. Результат можно переиспользовать для любых параметров нарезки.
+ * Возвращает { duration, audioStreams, profile }, где profile = null, если звука нет.
+ */
+async function analyzeVideo({ job, ffmpegPath, ffprobePath, input, onProgress }) {
+  const { duration, audioStreams } = await probeMedia({ job, ffprobePath, input });
+  if (audioStreams === 0) return { duration, audioStreams, profile: null };
+  const profile = await computeProfile({ job, ffmpegPath, input, duration, audioStreams, onProgress });
+  return { duration, audioStreams, profile };
 }
 
 function validateOptions(opts) {
@@ -25,43 +49,63 @@ function validateOptions(opts) {
   if (opts.mode !== 'fixed' && opts.mode !== 'smart') throw new Error('Неизвестный режим');
   if (!ALLOWED_LENGTHS.includes(opts.clipLen)) throw new Error('Длина клипа: 20, 30 или 60 секунд');
   const count = Number(opts.count);
-  if (!Number.isInteger(count) || count < 1 || count > 60) throw new Error('Количество клипов: от 1 до 60');
-  const orientation = opts.orientation === undefined ? 'horizontal' : opts.orientation;
-  if (orientation !== 'horizontal' && orientation !== 'vertical') throw new Error('Формат: горизонтальный или вертикальный');
-  return { ...opts, count, orientation, fast: Boolean(opts.fast) };
+  if (!Number.isInteger(count) || count < 1 || count > MAX_CLIPS) {
+    throw new Error(`Количество клипов: от 1 до ${MAX_CLIPS}`);
+  }
+  return { ...opts, count, fast: Boolean(opts.fast) };
 }
 
 /**
- * Весь процесс: длительность -> выбор моментов -> нарезка.
+ * Выбор моментов и нарезка. Если анализ звука уже сделан (analysis), он не повторяется.
  * onProgress({ stage: 'analyze' | 'cut', value: 0..1, label })
+ * Возвращает результат и сам анализ (его кэширует вызывающий код).
  */
-async function runPipeline({ job, ffmpegPath, ffprobePath, options, onProgress }) {
+async function runPipeline({ job, ffmpegPath, ffprobePath, options, analysis, onProgress }) {
   const opts = validateOptions(options);
-  const duration = await probeDuration({ job, ffprobePath, input: opts.input });
+
+  let info = analysis;
+  if (!info) {
+    if (opts.mode === 'smart') {
+      onProgress({ stage: 'analyze', value: 0, label: 'Слушаю звук' });
+      info = await analyzeVideo({
+        job, ffmpegPath, ffprobePath, input: opts.input,
+        onProgress: (v) => onProgress({ stage: 'analyze', value: v, label: 'Слушаю звук' }),
+      });
+    } else {
+      const media = await probeMedia({ job, ffprobePath, input: opts.input });
+      info = { ...media, profile: null };
+    }
+  }
+  const { duration, audioStreams } = info;
 
   let segments;
   let note = '';
   if (opts.mode === 'fixed') {
     segments = fixedSegments(duration, opts.clipLen);
-  } else {
+  } else if (!info.profile) {
+    if (audioStreams === 0) {
+      throw new Error('В этом видео нет звука, поэтому режим «По звуку» не работает. Выбери «Подряд».');
+    }
+    // Анализ ещё не делали (например, был отменён): делаем сейчас.
     onProgress({ stage: 'analyze', value: 0, label: 'Слушаю звук' });
-    const db = await computeLoudness({
-      job,
-      ffmpegPath,
-      input: opts.input,
-      duration,
+    info = await analyzeVideo({
+      job, ffmpegPath, ffprobePath, input: opts.input,
       onProgress: (v) => onProgress({ stage: 'analyze', value: v, label: 'Слушаю звук' }),
     });
-    segments = findHighlights(db, { clipLen: opts.clipLen, count: opts.count, duration });
+    segments = findHighlights(info.profile, { clipLen: opts.clipLen, count: opts.count, duration });
+  } else {
+    segments = findHighlights(info.profile, { clipLen: opts.clipLen, count: opts.count, duration });
+  }
+  if (opts.mode === 'smart') {
     if (segments.length === 0) {
-      note = 'Ярких моментов не нашлось: звук ровный. Попробуй режим «Подряд».';
+      note = 'Подходящих моментов с голосом не нашлось. Попробуй режим «Подряд».';
     } else if (segments.length < opts.count) {
-      note = `Нашлось ${segments.length} из ${opts.count}: остальные моменты слишком тихие.`;
+      note = `Нашлось ${segments.length} из ${opts.count}: в остальных местах нет заметных реакций с голосом.`;
     }
   }
 
   if (segments.length === 0) {
-    return { folder: null, clips: [], duration, note: note || 'Видео слишком короткое' };
+    return { folder: null, clips: [], duration, note: note || 'Видео слишком короткое', analysis: info };
   }
 
   const result = await cutClips({
@@ -71,12 +115,19 @@ async function runPipeline({ job, ffmpegPath, ffprobePath, options, onProgress }
     segments,
     outDir: opts.outDir,
     fast: opts.fast,
-    vertical: opts.orientation === 'vertical',
+    audioStreams,
     onProgress: (value, done, total) =>
       onProgress({ stage: 'cut', value, label: `Режу клипы ${done} из ${total}` }),
   });
 
-  return { ...result, duration, note };
+  const noSound = result.clips.filter((c) => c.audio !== 'ok').length;
+  if (audioStreams === 0) {
+    note = (note ? note + ' ' : '') + 'В исходном видео нет звука, клипы тоже без звука.';
+  } else if (noSound > 0) {
+    note = (note ? note + ' ' : '') + `В ${noSound} ${noSound === 1 ? 'клипе' : 'клипах'} звук пропадает: ${noSound === 1 ? 'он отмечен' : 'они отмечены'} в списке.`;
+  }
+
+  return { ...result, duration, audioStreams, note, analysis: info };
 }
 
-module.exports = { runPipeline, probeDuration };
+module.exports = { runPipeline, analyzeVideo, probeMedia, probeDuration, MAX_CLIPS };

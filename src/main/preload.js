@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('clipper', {
   pickVideo: () => ipcRenderer.invoke('dialog:video'),
   pickFolder: () => ipcRenderer.invoke('dialog:folder'),
   probe: (input) => ipcRenderer.invoke('video:probe', input),
+  analyze: (input) => ipcRenderer.invoke('video:analyze', input),
   trash: (file) => ipcRenderer.invoke('video:trash', file),
   download: (url, outDir) => ipcRenderer.invoke('video:download', { url, outDir }),
   run: (options) => ipcRenderer.invoke('job:run', options),

@@ -7,7 +7,7 @@ const el = {
   drop: $('drop'), file: $('file'), fileName: $('file-name'), fileMeta: $('file-meta'),
   fileChange: $('file-change'), fileRemove: $('file-remove'), confirm: $('remove-confirm'),
   removeKeep: $('remove-keep'), removeTrash: $('remove-trash'), removeCancel: $('remove-cancel'),
-  orientHint: $('orient-hint'), fastHint: $('fast-hint'), urlForm: $('url-form'), url: $('url'), urlGo: $('url-go'),
+  urlForm: $('url-form'), url: $('url'), urlGo: $('url-go'),
   modeHint: $('mode-hint'), countField: $('count-field'), count: $('count'), countOut: $('count-out'),
   fast: $('fast'), outPath: $('out-path'), outChange: $('out-change'),
   run: $('run'), progress: $('progress'), progressLabel: $('progress-label'), progressPct: $('progress-pct'),
@@ -16,20 +16,21 @@ const el = {
   openFolder: $('open-folder'), copyTimes: $('copy-times'),
 };
 
-const state = { input: null, duration: 0, outDir: '', busy: false, last: null, downloaded: false };
+const state = {
+  input: null,
+  duration: 0,
+  audioStreams: 1,
+  outDir: '',
+  busy: false, // идёт скачивание или нарезка
+  analyzing: false, // идёт фоновый анализ звука
+  token: 0, // номер текущего анализа: ответы устаревших анализов игнорируем
+  last: null,
+  downloaded: false,
+};
 
 const MODE_HINTS = {
-  smart: 'Ищет крики, смех и всплески громкости, режет клип вокруг каждого',
+  smart: 'Ищет реакции стримера: крики, смех, эмоции в голосе. Музыка и шум игры не считаются',
   fixed: 'Режет всё видео подряд на равные куски',
-};
-
-const ORIENT_HINTS = {
-  horizontal: 'Кадр остаётся как в исходном видео',
-  vertical: 'Из центра кадра вырезается полоса 9:16, края слева и справа обрезаются. Клипы 1080×1920',
-};
-const FAST_HINTS = {
-  on: 'Без перекодирования: почти мгновенно, но начало клипа может сдвинуться на пару секунд',
-  vertical: 'Недоступно для вертикального формата: кадр нужно перекодировать',
 };
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -46,9 +47,13 @@ function human(sec) {
   if (h) return `${h} ч ${m} мин`;
   return m ? `${m} мин ${s % 60} с` : `${s} с`;
 }
+function audioText(n) {
+  if (n === 0) return 'без звука';
+  if (n === 1) return 'звук есть';
+  return `${n} ${n < 5 ? 'дорожки' : 'дорожек'} звука`;
+}
 
 function getMode() { return document.querySelector('input[name="mode"]:checked').value; }
-function getOrient() { return document.querySelector('input[name="orient"]:checked').value; }
 function getLen() { return Number(document.querySelector('input[name="len"]:checked').value); }
 
 function setStatus(text, kind = '') {
@@ -70,48 +75,89 @@ function refresh() {
   el.modeHint.textContent = MODE_HINTS[getMode()];
   el.countField.hidden = !smart;
   el.countOut.textContent = el.count.value;
-  const vertical = getOrient() === 'vertical';
-  el.orientHint.textContent = ORIENT_HINTS[getOrient()];
-  el.fast.disabled = vertical;
-  el.fast.closest('.check').classList.toggle('disabled', vertical);
-  el.fastHint.textContent = vertical ? FAST_HINTS.vertical : FAST_HINTS.on;
   el.outPath.textContent = state.outDir;
   el.outPath.title = state.outDir;
-  el.run.disabled = state.busy || !state.input || !state.outDir;
-  el.run.textContent = state.busy ? 'Отмена' : 'Нарезать';
-  el.run.disabled = !state.busy && (!state.input || !state.outDir);
+
+  // В режиме «по звуку» нарезать можно, когда анализ закончен.
+  const waiting = state.analyzing && smart;
+  el.run.textContent = state.busy ? 'Отмена' : waiting ? 'Слушаю звук…' : 'Нарезать';
+  el.run.disabled = !state.busy && (!state.input || !state.outDir || waiting);
+
   el.urlGo.disabled = state.busy;
   el.url.disabled = state.busy;
   el.fileChange.disabled = state.busy;
   el.fileRemove.disabled = state.busy;
-  document.querySelectorAll('input[name="orient"]').forEach((i) => (i.disabled = state.busy));
   el.outChange.disabled = state.busy;
 }
 
-function setVideo({ file, duration, name, downloaded = false }) {
+/**
+ * Анализ звука запускается сразу после появления видео: пока человек выбирает параметры,
+ * приложение уже слушает. Когда параметры выбраны, моменты подбираются мгновенно.
+ */
+async function startAnalysis() {
+  const file = state.input;
+  const token = ++state.token;
+  state.analyzing = true;
+  refresh();
+  showProgress({ value: 0, label: 'Слушаю звук' });
+
+  const res = await api.analyze(file);
+  if (token !== state.token) return; // видео сменили или убрали, пока шёл анализ
+
+  state.analyzing = false;
+  hideProgress();
+  if (res.ok) {
+    state.audioStreams = res.data.audioStreams;
+    el.fileMeta.textContent = `${human(res.data.duration)} · ${audioText(res.data.audioStreams)}`;
+    if (res.data.audioStreams === 0) {
+      const fixed = document.querySelector('input[name="mode"][value="fixed"]');
+      fixed.checked = true;
+      setStatus('В видео нет звука: режим «По звуку» недоступен, клипы будут без звука', 'error');
+    } else {
+      setStatus('Звук проанализирован. Выбери параметры и нажми «Нарезать»');
+    }
+  } else if (!res.cancelled) {
+    setStatus(res.error, 'error');
+  }
+  refresh();
+}
+
+// Остановить анализ, если он идёт (видео убрали или заменили).
+function stopAnalysis() {
+  if (!state.analyzing) return;
+  state.token += 1;
+  state.analyzing = false;
+  hideProgress();
+  api.cancel();
+}
+
+function setVideo({ file, duration, name, audioStreams = 1, downloaded = false }) {
   state.input = file;
   state.duration = duration;
+  state.audioStreams = audioStreams;
   state.downloaded = downloaded;
   el.confirm.hidden = true;
   el.drop.hidden = true;
   el.file.hidden = false;
   el.fileName.textContent = name;
   el.fileName.title = file;
-  el.fileMeta.textContent = human(duration);
+  el.fileMeta.textContent = `${human(duration)} · ${audioText(audioStreams)}`;
   el.results.hidden = true;
   setStatus('');
   refresh();
+  startAnalysis();
 }
 
 async function loadFile(file) {
   const res = await api.probe(file);
   if (!res.ok) { setStatus(res.error, 'error'); return; }
-  setVideo({ file, duration: res.data.duration, name: res.data.name, downloaded: res.data.downloaded });
+  setVideo({ file, duration: res.data.duration, name: res.data.name, audioStreams: res.data.audioStreams, downloaded: res.data.downloaded });
 }
 
 // Убрать видео из приложения. Файл на диске трогаем только если его скачало приложение
 // и человек выбрал «В корзину».
 function clearVideo(message = '') {
+  stopAnalysis();
   state.input = null;
   state.duration = 0;
   state.downloaded = false;
@@ -159,7 +205,11 @@ function hideProgress() {
   el.barFill.style.transform = 'scaleX(0)';
 }
 
-api.onProgress(showProgress);
+// Прогресс чужого (отменённого) анализа не показываем.
+api.onProgress((p) => {
+  if (p.stage === 'analyze' && !state.analyzing && !state.busy) return;
+  showProgress(p);
+});
 
 // Выбор и перетаскивание файла
 async function pick() {
@@ -200,13 +250,13 @@ el.outChange.addEventListener('click', async () => {
   if (res.ok && res.data) { state.outDir = res.data; refresh(); }
 });
 
-// Загрузка по ссылке
+// Загрузка по ссылке: скачалось, дальше сразу анализ звука, потом параметры.
 el.urlForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = el.url.value.trim();
   if (!url || state.busy) return;
+  stopAnalysis();
   state.busy = true;
-  el.run.textContent = 'Отмена';
   refresh();
   el.run.disabled = false;
   setStatus('');
@@ -215,19 +265,25 @@ el.urlForm.addEventListener('submit', async (e) => {
   state.busy = false;
   hideProgress();
   if (res.ok) {
-    setVideo({ file: res.data.file, duration: res.data.duration, name: res.data.name, downloaded: res.data.downloaded });
     el.url.value = '';
-  } else if (!res.cancelled) {
-    setStatus(res.error, 'error');
+    setVideo({
+      file: res.data.file, duration: res.data.duration, name: res.data.name,
+      audioStreams: res.data.audioStreams, downloaded: res.data.downloaded,
+    });
   } else {
-    setStatus('Отменено');
+    setStatus(res.cancelled ? 'Отменено' : res.error, res.cancelled ? '' : 'error');
+    if (state.input) startAnalysis(); // прежнее видео остаётся, дослушиваем его
+    else refresh();
   }
-  refresh();
 });
 
 // Нарезка и отмена
 el.run.addEventListener('click', async () => {
   if (state.busy) { await api.cancel(); return; }
+  if (state.analyzing) { // режим «подряд» анализа не ждёт
+    state.token += 1;
+    state.analyzing = false;
+  }
   state.busy = true;
   refresh();
   el.run.disabled = false;
@@ -240,7 +296,6 @@ el.run.addEventListener('click', async () => {
     outDir: state.outDir,
     mode: getMode(),
     clipLen: getLen(),
-    orientation: getOrient(),
     count: Number(el.count.value),
     fast: el.fast.checked,
   });
@@ -256,6 +311,8 @@ el.run.addEventListener('click', async () => {
   renderResults(res.data);
 });
 
+const AUDIO_WARN = { partial: 'звук пропадает', none: 'нет звука' };
+
 function renderResults(data) {
   state.last = data;
   if (!data.clips.length) {
@@ -266,17 +323,19 @@ function renderResults(data) {
   el.resultsList.replaceChildren(
     ...data.clips.map((c, i) => {
       const li = document.createElement('li');
-      li.style.setProperty('--i', i);
+      li.style.setProperty('--i', Math.min(i, 12));
       li.append(
         cell('idx num', String(c.index).padStart(2, '0')),
         cell('time', `${clock(c.start)} – ${clock(c.end)}`),
+        cell('warn', AUDIO_WARN[c.audio] || ''),
         cell('score', c.score ? `+${c.score} дБ` : '')
       );
       return li;
     })
   );
   el.results.hidden = false;
-  setStatus(data.note || 'Клипы сохранены', data.note ? '' : 'ok');
+  const hasWarn = data.clips.some((c) => c.audio !== 'ok');
+  setStatus(data.note || 'Клипы сохранены', data.note ? (hasWarn ? 'error' : '') : 'ok');
 }
 
 function plural(n) {
@@ -308,7 +367,7 @@ el.copyTimes.addEventListener('click', async () => {
   }
 });
 
-document.querySelectorAll('input[name="mode"], input[name="len"], input[name="orient"]').forEach((i) => i.addEventListener('change', refresh));
+document.querySelectorAll('input[name="mode"], input[name="len"]').forEach((i) => i.addEventListener('change', refresh));
 el.count.addEventListener('input', refresh);
 
 (async function init() {

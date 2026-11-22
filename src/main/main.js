@@ -6,13 +6,36 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 
 const { Job } = require('./job');
 const tools = require('./tools');
-const { runPipeline, probeDuration } = require('./pipeline');
+const { runPipeline, probeMedia, analyzeVideo } = require('./pipeline');
 const { downloadVideo } = require('./downloader');
 
 let win = null;
 let currentJob = null;
 // Файлы, которые скачало само приложение. Только их разрешено отправлять в корзину.
 const downloaded = new Set();
+// Результат анализа звука по файлу: после него параметры нарезки меняются мгновенно.
+const analysisCache = new Map();
+const CACHE_LIMIT = 5;
+
+function cacheKey(file) {
+  const st = fs.statSync(file);
+  return `${file}|${st.size}|${Math.round(st.mtimeMs)}`;
+}
+
+function cachedAnalysis(file) {
+  try {
+    return analysisCache.get(cacheKey(file));
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function storeAnalysis(file, analysis) {
+  const key = cacheKey(file);
+  analysisCache.delete(key);
+  analysisCache.set(key, analysis);
+  while (analysisCache.size > CACHE_LIMIT) analysisCache.delete(analysisCache.keys().next().value);
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -57,9 +80,12 @@ function handle(channel, fn) {
   });
 }
 
-function startJob() {
-  if (currentJob) throw new Error('Уже идёт работа, дождись конца или нажми «Отмена»');
+// Анализ звука идёт в фоне и уступает место любой новой работе (скачать, нарезать).
+function startJob(kind) {
+  if (currentJob && currentJob.kind === 'analyze') currentJob.cancel();
+  else if (currentJob) throw new Error('Уже идёт работа, дождись конца или нажми «Отмена»');
   currentJob = new Job();
+  currentJob.kind = kind;
   return currentJob;
 }
 
@@ -99,9 +125,31 @@ handle('dialog:folder', async () => {
 handle('video:probe', async (input) => {
   requireString(input, 'input');
   if (!fs.existsSync(input) || !fs.statSync(input).isFile()) throw new Error('Файл не найден');
-  const job = new Job();
-  const duration = await probeDuration({ job, ffprobePath: tools.ffprobePath(), input });
-  return { duration, name: path.basename(input), downloaded: downloaded.has(input) };
+  const { duration, audioStreams } = await probeMedia({ job: new Job(), ffprobePath: tools.ffprobePath(), input });
+  return { duration, audioStreams, name: path.basename(input), downloaded: downloaded.has(input) };
+});
+
+// Слушает звук один раз и запоминает результат. Если он уже есть, отвечает сразу.
+handle('video:analyze', async (input) => {
+  requireString(input, 'input');
+  if (!fs.existsSync(input) || !fs.statSync(input).isFile()) throw new Error('Файл не найден');
+  const cached = cachedAnalysis(input);
+  if (cached) return { duration: cached.duration, audioStreams: cached.audioStreams };
+  const job = startJob('analyze');
+  try {
+    send('job:progress', { stage: 'analyze', value: 0, label: 'Слушаю звук' });
+    const info = await analyzeVideo({
+      job,
+      ffmpegPath: tools.ffmpegPath(),
+      ffprobePath: tools.ffprobePath(),
+      input,
+      onProgress: (value) => send('job:progress', { stage: 'analyze', value, label: 'Слушаю звук' }),
+    });
+    storeAnalysis(input, info);
+    return { duration: info.duration, audioStreams: info.audioStreams };
+  } finally {
+    endJob(job);
+  }
 });
 
 // Убрать видео из приложения можно всегда (это делает интерфейс сам).
@@ -118,7 +166,7 @@ handle('video:trash', async (file) => {
 handle('video:download', async ({ url, outDir }) => {
   requireString(url, 'url');
   requireString(outDir, 'outDir');
-  const job = startJob();
+  const job = startJob('download');
   try {
     send('job:progress', { stage: 'download', value: 0, label: 'Готовлю загрузчик' });
     const ytdlp = await tools.ensureYtDlp(app.getPath('userData'));
@@ -129,24 +177,29 @@ handle('video:download', async ({ url, outDir }) => {
       outDir,
       onProgress: (value) => send('job:progress', { stage: 'download', value, label: 'Скачиваю видео' }),
     });
-    const duration = await probeDuration({ job, ffprobePath: tools.ffprobePath(), input: file });
+    const { duration, audioStreams } = await probeMedia({ job, ffprobePath: tools.ffprobePath(), input: file });
     downloaded.add(file);
-    return { file, duration, name: title || path.basename(file), downloaded: true };
+    return { file, duration, audioStreams, name: title || path.basename(file), downloaded: true };
   } finally {
     endJob(job);
   }
 });
 
 handle('job:run', async (options) => {
-  const job = startJob();
+  const job = startJob('run');
   try {
-    return await runPipeline({
+    const input = options && options.input;
+    const exists = typeof input === 'string' && fs.existsSync(input);
+    const { analysis, ...result } = await runPipeline({
       job,
       ffmpegPath: tools.ffmpegPath(),
       ffprobePath: tools.ffprobePath(),
       options,
+      analysis: exists ? cachedAnalysis(input) : undefined,
       onProgress: (p) => send('job:progress', p),
     });
+    if (exists && analysis) storeAnalysis(input, analysis);
+    return result; // сам анализ в интерфейс не отдаём: он большой и ему там нечего делать
   } finally {
     endJob(job);
   }
