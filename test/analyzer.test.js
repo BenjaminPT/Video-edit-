@@ -12,9 +12,10 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const { Job } = require('../src/main/job');
-const { computeProfile, findHighlights, fixedSegments } = require('../src/main/analyzer');
+const { computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments } = require('../src/main/analyzer');
+const { Semaphore } = require('../src/main/queue');
 const { cutClips, checkAudio } = require('../src/main/cutter');
-const { runPipeline, probeMedia, analyzeVideo } = require('../src/main/pipeline');
+const { runPipeline, runBatch, probeMedia, analyzeVideo } = require('../src/main/pipeline');
 
 function resolveTool(name) {
   try {
@@ -222,7 +223,103 @@ const covers = (seg, t) => seg.start <= t && seg.end >= t;
     const dlB = await downloadVideo({ job: new Job(), tools: toolset, url: 'https://www.twitch.tv/videos/2', outDir: path.join(tmp, 'dlB'), onProgress() {} });
     assert.strictEqual(path.basename(dlB.file), 'v123.mp4');
     delete process.env.FAKE_PRINT_PATH;
+
+    // Две загрузки одновременно: оба поддельных файла называются v123.mp4, но не затирают друг друга
+    const { downloadInto } = require('../src/main/downloader');
+    const dlDir = path.join(tmp, 'dlC');
+    process.env.FAKE_PRINT_PATH = '0';
+    const both = await Promise.all([
+      downloadInto({ job: new Job(), tools: toolset, url: 'https://www.twitch.tv/videos/3', outDir: dlDir, id: '1', onProgress() {} }),
+      downloadInto({ job: new Job(), tools: toolset, url: 'https://www.twitch.tv/videos/4', outDir: dlDir, id: '2', onProgress() {} }),
+    ]);
+    delete process.env.FAKE_PRINT_PATH;
+    assert.notStrictEqual(both[0].file, both[1].file, 'параллельные загрузки перезаписали друг друга');
+    assert.deepStrictEqual(fs.readdirSync(dlDir).sort(), ['v123.mp4', 'v123_2.mp4'], 'во временных папках не должно остаться мусора: ' + fs.readdirSync(dlDir));
   }
+
+  // --- режим «лучшие»: рейтинг, топ без повторов, несколько видео
+  const ranked = rankCandidates(profile, { clipLen: 20, duration: media.duration });
+  assert.ok(ranked.length >= 3 && ranked.every((c) => c.score > 0 && c.tag), 'у кандидатов должны быть оценка и подсказка');
+  assert.ok(ranked.every((c) => !covers(c, 205.5)), 'заглушённое место не должно попадать в рейтинг');
+  assert.ok(ranked.every((c) => c.peak < 68 || c.peak > 80), 'музыка без голоса не должна попадать в рейтинг');
+  const entries = ranked.map((c) => ({ ...c, videoId: 0 }));
+  const topPick = pickTop(entries, { count: 3 });
+  assert.strictEqual(topPick.length, 3);
+  assert.deepStrictEqual(topPick.map((t) => t.rank), [1, 2, 3]);
+  assert.ok(topPick[0].score >= topPick[1].score && topPick[1].score >= topPick[2].score, 'топ должен идти по убыванию оценки');
+  REACTIONS.forEach((t) => assert.ok(topPick.some((c) => covers(c, t + 3)), `реакция на ${t} с не попала в топ-3`));
+  for (let i = 0; i < topPick.length; i++) {
+    for (let j = i + 1; j < topPick.length; j++) {
+      assert.ok(topPick[i].end <= topPick[j].start || topPick[j].end <= topPick[i].start, 'клипы топа пересекаются');
+      assert.ok(Math.abs(topPick[i].peak - topPick[j].peak) >= 60, 'пики топа ближе минимального интервала');
+    }
+  }
+  // Квота на «горячую минуту»: три клипа подряд из одних 15 минут уступают очереди остальным
+  const crowd = [
+    { videoId: 0, start: 0, end: 20, peak: 7, score: 9 }, { videoId: 0, start: 100, end: 120, peak: 107, score: 8 },
+    { videoId: 0, start: 200, end: 220, peak: 207, score: 7 }, { videoId: 0, start: 2000, end: 2020, peak: 2007, score: 3 },
+  ];
+  assert.deepStrictEqual(pickTop(crowd, { count: 3 }).map((c) => c.peak), [7, 107, 2007], 'квота на 15 минут не сработала');
+  assert.strictEqual(pickTop(crowd, { count: 4 }).length, 4, 'при нехватке строгих клипов квота ослабляется');
+
+  const batchEvents = [];
+  const batch = await runBatch({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe,
+    videos: [{ id: 'a', input: stream }, { id: 'b', input: stream }],
+    options: { outDir: path.join(tmp, 'outTop'), mode: 'top', clipLen: 20, count: 4, fast: true },
+    onProgress: (p) => batchEvents.push(p),
+  });
+  assert.strictEqual(batch.clips.length, 4, 'два одинаковых видео дают по три реакции: из шести берём четыре');
+  assert.deepStrictEqual(batch.clips.map((c) => c.rank), [1, 2, 3, 4]);
+  assert.ok(path.basename(batch.clips[0].file).startsWith('01_'), 'файлы топа нумеруются по рейтингу');
+  assert.ok(batch.clips.every((c) => c.audio === 'ok' && c.tag && c.video === 'stream'));
+  assert.strictEqual(path.dirname(batch.clips[0].file), batch.folder, 'клипы топа лежат в одной папке');
+  assert.strictEqual(batch.analyses.length, 2);
+  assert.ok(batchEvents.some((e) => e.stage === 'analyze' && /1 из 2/.test(e.label)), 'при нескольких видео прогресс анализа показывает номер');
+
+  const mixed = await runBatch({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe,
+    videos: [{ id: 'c', input: twoTracks }, { id: 'd', input: silentFile }],
+    options: { outDir: path.join(tmp, 'outMixed'), mode: 'fixed', clipLen: 20, count: 1, fast: true },
+    onProgress() {},
+  });
+  assert.strictEqual(mixed.clips.length, 4, '30 с и 25 с по 20 с: у каждого полный клип и хвост');
+  assert.deepStrictEqual(mixed.clips.map((c) => c.index), [1, 2, 3, 4]);
+  const mixedSmart = await runBatch({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe,
+    videos: [{ id: 'e', input: stream }, { id: 'f', input: silentFile }],
+    options: { outDir: path.join(tmp, 'outMixed2'), mode: 'smart', clipLen: 20, count: 3, fast: true },
+    onProgress() {},
+  });
+  assert.strictEqual(mixedSmart.clips.length, 3);
+  assert.match(mixedSmart.note, /пропущено/, 'видео без звука пропускается с пояснением, если есть другие');
+  await assert.rejects(
+    runBatch({ job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe, videos: [], options: { outDir: tmp, mode: 'top', clipLen: 20, count: 3 }, onProgress() {} }),
+    /Не выбрано видео/
+  );
+
+  // --- очередь: не больше двух задач сразу, ожидающая задача выходит по отмене
+  const sem = new Semaphore(2);
+  let running = 0;
+  let maxRunning = 0;
+  const work = async () => {
+    const release = await sem.acquire(new Job());
+    running += 1;
+    maxRunning = Math.max(maxRunning, running);
+    await new Promise((r) => setTimeout(r, 40));
+    running -= 1;
+    release();
+  };
+  await Promise.all([work(), work(), work(), work(), work()]);
+  assert.strictEqual(maxRunning, 2, 'очередь должна пускать не больше двух задач сразу');
+  const slotA = await sem.acquire(new Job());
+  const slotB = await sem.acquire(new Job());
+  const waitingJob = new Job();
+  const waiting = sem.acquire(waitingJob);
+  waitingJob.cancel();
+  await assert.rejects(waiting, (e) => e.name === 'CancelledError');
+  slotA(); slotB();
+  assert.strictEqual(sem.active, 0);
 
   // --- отмена
   const cancelJob = new Job();

@@ -4,33 +4,38 @@ const $ = (id) => document.getElementById(id);
 const api = window.clipper;
 
 const el = {
-  drop: $('drop'), file: $('file'), fileName: $('file-name'), fileMeta: $('file-meta'),
-  fileChange: $('file-change'), fileRemove: $('file-remove'), confirm: $('remove-confirm'),
-  removeKeep: $('remove-keep'), removeTrash: $('remove-trash'), removeCancel: $('remove-cancel'),
-  urlForm: $('url-form'), url: $('url'), urlGo: $('url-go'),
-  modeHint: $('mode-hint'), countField: $('count-field'), count: $('count'), countOut: $('count-out'),
+  drop: $('drop'),
+  urlForm: $('url-form'), urls: $('urls'), urlGo: $('url-go'),
+  library: $('library'), libraryList: $('library-list'), libraryTitle: $('library-title'), selectAll: $('select-all'),
+  modeHint: $('mode-hint'), countField: $('count-field'), count: $('count'), countOut: $('count-out'), countLabel: $('count-label'),
   fast: $('fast'), outPath: $('out-path'), outChange: $('out-change'),
   run: $('run'), progress: $('progress'), progressLabel: $('progress-label'), progressPct: $('progress-pct'),
-  barWrap: document.querySelector('.bar'), barFill: $('bar-fill'), status: $('status'),
+  barWrap: document.querySelector('.progress .bar'), barFill: $('bar-fill'), status: $('status'),
   results: $('results'), resultsTitle: $('results-title'), resultsList: $('results-list'),
   openFolder: $('open-folder'), copyTimes: $('copy-times'),
 };
 
+/**
+ * Видео в библиотеке: { id, file, name, duration, audioStreams, downloaded, selected,
+ *   phase: 'queued' | 'downloading' | 'ready' | 'error', label, value, analysis: 'none' | 'running' | 'done',
+ *   error, confirming }
+ */
 const state = {
-  input: null,
-  duration: 0,
-  audioStreams: 1,
+  items: [],
+  nextId: 1,
   outDir: '',
-  busy: false, // идёт скачивание или нарезка
-  analyzing: false, // идёт фоновый анализ звука
-  token: 0, // номер текущего анализа: ответы устаревших анализов игнорируем
+  busy: false, // идёт нарезка
   last: null,
-  downloaded: false,
 };
 
 const MODE_HINTS = {
-  smart: 'Ищет реакции стримера: крики, смех, эмоции в голосе. Музыка и шум игры не считаются',
-  fixed: 'Режет всё видео подряд на равные куски',
+  top: 'Сам выбирает самые яркие моменты со всех выбранных видео: крик, смех, эмоции в голосе. Лучшие идут первыми',
+  smart: 'Берёт все заметные реакции стримера из каждого видео. Музыка и шум игры не считаются',
+  fixed: 'Режет каждое видео подряд на равные куски',
+};
+const COUNT = {
+  top: { label: 'Сколько лучших клипов', min: 3, max: 30, value: 10 },
+  smart: { label: 'Клипов из каждого видео', min: 3, max: 100, value: 15 },
 };
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -52,16 +57,23 @@ function audioText(n) {
   if (n === 1) return 'звук есть';
   return `${n} ${n < 5 ? 'дорожки' : 'дорожек'} звука`;
 }
+function plural(n, one, few, many) {
+  const a = n % 10, b = n % 100;
+  if (a === 1 && b !== 11) return one;
+  if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return few;
+  return many;
+}
 
-function getMode() { return document.querySelector('input[name="mode"]:checked').value; }
-function getLen() { return Number(document.querySelector('input[name="len"]:checked').value); }
+const getMode = () => document.querySelector('input[name="mode"]:checked').value;
+const getLen = () => Number(document.querySelector('input[name="len"]:checked').value);
+const find = (id) => state.items.find((i) => i.id === id);
+const ready = (i) => i.phase === 'ready';
 
 function setStatus(text, kind = '') {
   el.status.textContent = text;
   el.status.className = 'status' + (kind ? ' ' + kind : '');
 }
 
-// Ползунок переключателя двигается через transform.
 function syncSegments() {
   document.querySelectorAll('.seg').forEach((seg) => {
     const inputs = Array.from(seg.querySelectorAll('input'));
@@ -69,122 +81,202 @@ function syncSegments() {
   });
 }
 
+function selectedItems() { return state.items.filter((i) => i.selected && ready(i)); }
+
 function refresh() {
   syncSegments();
-  const smart = getMode() === 'smart';
-  el.modeHint.textContent = MODE_HINTS[getMode()];
-  el.countField.hidden = !smart;
+  const mode = getMode();
+  el.modeHint.textContent = MODE_HINTS[mode];
+  el.countField.hidden = mode === 'fixed';
   el.countOut.textContent = el.count.value;
   el.outPath.textContent = state.outDir;
   el.outPath.title = state.outDir;
 
-  // В режиме «по звуку» нарезать можно, когда анализ закончен.
-  const waiting = state.analyzing && smart;
-  el.run.textContent = state.busy ? 'Отмена' : waiting ? 'Слушаю звук…' : 'Нарезать';
-  el.run.disabled = !state.busy && (!state.input || !state.outDir || waiting);
+  const picked = selectedItems();
+  const listening = mode !== 'fixed' && picked.some((i) => i.analysis === 'running' && i.audioStreams > 0);
+  el.run.textContent = state.busy ? 'Отмена' : listening ? 'Слушаю звук…' : picked.length > 1 ? `Нарезать (${picked.length})` : 'Нарезать';
+  el.run.disabled = !state.busy && (picked.length === 0 || !state.outDir || listening);
 
-  el.urlGo.disabled = state.busy;
-  el.url.disabled = state.busy;
-  el.fileChange.disabled = state.busy;
-  el.fileRemove.disabled = state.busy;
   el.outChange.disabled = state.busy;
+  el.urlGo.disabled = !state.outDir;
+
+  el.library.hidden = state.items.length === 0;
+  const n = state.items.length;
+  el.libraryTitle.textContent = `${n} ${plural(n, 'видео', 'видео', 'видео')}, выбрано ${picked.length}`;
+  const selectable = state.items.filter(ready);
+  el.selectAll.checked = selectable.length > 0 && selectable.every((i) => i.selected);
+  el.selectAll.disabled = selectable.length === 0 || state.busy;
+  state.items.forEach(renderItem);
 }
 
-/**
- * Анализ звука запускается сразу после появления видео: пока человек выбирает параметры,
- * приложение уже слушает. Когда параметры выбраны, моменты подбираются мгновенно.
- */
-async function startAnalysis() {
-  const file = state.input;
-  const token = ++state.token;
-  state.analyzing = true;
+// ---- Библиотека ----
+
+const itemNodes = new Map();
+
+function button(text, cls, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn ghost ' + cls;
+  b.textContent = text;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function metaText(item) {
+  if (item.phase === 'queued') return item.label || 'В очереди';
+  if (item.phase === 'downloading') return item.label || 'Скачиваю';
+  if (item.phase === 'error') return item.error || 'Ошибка';
+  const base = `${human(item.duration)} · ${audioText(item.audioStreams)}`;
+  if (item.analysis === 'running') return `${base} · ${item.label || 'Слушаю звук'}`;
+  if (item.analysis === 'done' && item.audioStreams > 0) return `${base} · звук проанализирован`;
+  return base;
+}
+
+function renderItem(item) {
+  let li = itemNodes.get(item.id);
+  if (!li) {
+    li = document.createElement('li');
+    li.className = 'item';
+    itemNodes.set(item.id, li);
+    el.libraryList.append(li);
+  }
+
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'item-check';
+  check.checked = item.selected && ready(item);
+  check.disabled = !ready(item) || state.busy;
+  check.setAttribute('aria-label', `Выбрать: ${item.name}`);
+  check.addEventListener('change', () => { item.selected = check.checked; refresh(); });
+
+  const name = document.createElement('span');
+  name.className = 'item-name';
+  name.textContent = item.name;
+  name.title = item.file || item.url || '';
+
+  const meta = document.createElement('span');
+  meta.className = 'item-meta' + (item.phase === 'error' ? ' error' : '');
+  meta.textContent = item.confirming ? 'Это видео скачало приложение. Что сделать с файлом?' : metaText(item);
+
+  const body = document.createElement('div');
+  body.className = 'item-body';
+  body.append(name, meta);
+
+  const working = item.phase === 'queued' || item.phase === 'downloading' || (ready(item) && item.analysis === 'running');
+  if (working && !item.confirming) {
+    const bar = document.createElement('div');
+    const known = typeof item.value === 'number';
+    bar.className = 'item-bar' + (known ? '' : ' busy');
+    const fill = document.createElement('i');
+    if (known) fill.style.transform = `scaleX(${Math.max(0, Math.min(1, item.value))})`;
+    bar.append(fill);
+    body.append(bar);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'item-actions';
+  if (item.confirming) {
+    actions.append(
+      button('Оставить на диске', '', () => removeItem(item, false)),
+      button('В корзину', 'danger', () => removeItem(item, true)),
+      button('Отмена', '', () => { item.confirming = false; refresh(); })
+    );
+  } else if (item.phase === 'queued' || item.phase === 'downloading') {
+    actions.append(button('Отмена', '', () => { api.cancelTask(item.id); }));
+  } else if (item.phase === 'error') {
+    actions.append(button('Убрать', '', () => removeItem(item, false)));
+  } else {
+    const rm = button('Убрать', '', () => askRemove(item));
+    rm.disabled = state.busy;
+    actions.append(rm);
+  }
+
+  li.replaceChildren(check, body, actions);
+}
+
+function askRemove(item) {
+  if (state.busy) return;
+  if (item.downloaded) { item.confirming = true; refresh(); } else removeItem(item, false);
+}
+
+async function removeItem(item, trash) {
+  if (trash) {
+    const res = await api.trash(item.file);
+    if (!res.ok) { setStatus(res.error, 'error'); return; }
+  }
+  api.cancelTask(item.id);
+  state.items = state.items.filter((i) => i !== item);
+  const li = itemNodes.get(item.id);
+  if (li) li.remove();
+  itemNodes.delete(item.id);
+  setStatus(trash ? 'Файл отправлен в корзину' : item.downloaded ? 'Видео убрано из приложения. Файл остался на диске' : 'Видео убрано из приложения. Файл на диске не тронут');
   refresh();
-  showProgress({ value: 0, label: 'Слушаю звук' });
+}
 
-  const res = await api.analyze(file);
-  if (token !== state.token) return; // видео сменили или убрали, пока шёл анализ
+el.selectAll.addEventListener('change', () => {
+  state.items.filter(ready).forEach((i) => { i.selected = el.selectAll.checked; });
+  refresh();
+});
 
-  state.analyzing = false;
-  hideProgress();
+// Анализ звука запускается сразу, как видео появилось; несколько видео встают в очередь.
+async function startAnalysis(item) {
+  if (item.audioStreams === 0) { item.analysis = 'done'; return; }
+  item.analysis = 'running';
+  item.label = 'В очереди на анализ';
+  item.value = null;
+  refresh();
+  const res = await api.analyze(item.id, item.file);
+  if (!find(item.id)) return;
+  item.analysis = res.ok ? 'done' : 'none';
+  item.value = undefined;
+  item.label = '';
   if (res.ok) {
-    state.audioStreams = res.data.audioStreams;
-    el.fileMeta.textContent = `${human(res.data.duration)} · ${audioText(res.data.audioStreams)}`;
-    if (res.data.audioStreams === 0) {
-      const fixed = document.querySelector('input[name="mode"][value="fixed"]');
-      fixed.checked = true;
-      setStatus('В видео нет звука: режим «По звуку» недоступен, клипы будут без звука', 'error');
-    } else {
-      setStatus('Звук проанализирован. Выбери параметры и нажми «Нарезать»');
-    }
+    item.audioStreams = res.data.audioStreams;
   } else if (!res.cancelled) {
-    setStatus(res.error, 'error');
+    setStatus(`${item.name}: ${res.error}`, 'error');
   }
   refresh();
 }
 
-// Остановить анализ, если он идёт (видео убрали или заменили).
-function stopAnalysis() {
-  if (!state.analyzing) return;
-  state.token += 1;
-  state.analyzing = false;
-  hideProgress();
-  api.cancel();
-}
-
-function setVideo({ file, duration, name, audioStreams = 1, downloaded = false }) {
-  state.input = file;
-  state.duration = duration;
-  state.audioStreams = audioStreams;
-  state.downloaded = downloaded;
-  el.confirm.hidden = true;
-  el.drop.hidden = true;
-  el.file.hidden = false;
-  el.fileName.textContent = name;
-  el.fileName.title = file;
-  el.fileMeta.textContent = `${human(duration)} · ${audioText(audioStreams)}`;
-  el.results.hidden = true;
-  setStatus('');
+function addReady(data, existing) {
+  const item = existing || {
+    id: String(state.nextId++),
+  };
+  Object.assign(item, {
+    file: data.file, name: data.name, duration: data.duration, audioStreams: data.audioStreams,
+    downloaded: Boolean(data.downloaded), phase: 'ready', selected: true, analysis: 'none',
+    label: '', value: undefined, error: '', confirming: false,
+  });
+  if (!existing) state.items.push(item);
   refresh();
-  startAnalysis();
+  startAnalysis(item);
+  return item;
 }
 
 async function loadFile(file) {
+  if (state.items.some((i) => i.file === file)) return; // уже в списке
   const res = await api.probe(file);
-  if (!res.ok) { setStatus(res.error, 'error'); return; }
-  setVideo({ file, duration: res.data.duration, name: res.data.name, audioStreams: res.data.audioStreams, downloaded: res.data.downloaded });
+  if (!res.ok) { setStatus(`${file.split(/[\\/]/).pop()}: ${res.error}`, 'error'); return; }
+  addReady({ file, duration: res.data.duration, name: res.data.name, audioStreams: res.data.audioStreams, downloaded: res.data.downloaded });
 }
 
-// Убрать видео из приложения. Файл на диске трогаем только если его скачало приложение
-// и человек выбрал «В корзину».
-function clearVideo(message = '') {
-  stopAnalysis();
-  state.input = null;
-  state.duration = 0;
-  state.downloaded = false;
-  state.last = null;
-  el.confirm.hidden = true;
-  el.file.hidden = true;
-  el.drop.hidden = false;
-  el.results.hidden = true;
-  setStatus(message);
-  refresh();
+async function loadFiles(files) {
+  setStatus('');
+  for (const f of files) await loadFile(f);
 }
 
-el.fileRemove.addEventListener('click', () => {
-  if (state.busy || !state.input) return;
-  if (state.downloaded) {
-    el.confirm.hidden = false;
-    el.removeKeep.focus();
-  } else {
-    clearVideo('Видео убрано из приложения. Файл на диске не тронут');
+// Прогресс загрузок и анализа приходит с номером видео, прогресс нарезки без него.
+api.onProgress((p) => {
+  if (p.id !== undefined) {
+    const item = find(String(p.id));
+    if (!item) return;
+    item.value = typeof p.value === 'number' ? p.value : null;
+    item.label = p.label || item.label;
+    if (p.stage === 'download') item.phase = /очереди/i.test(p.label || '') ? 'queued' : 'downloading';
+    renderItem(item);
+    return;
   }
-});
-el.removeCancel.addEventListener('click', () => { el.confirm.hidden = true; el.fileRemove.focus(); });
-el.removeKeep.addEventListener('click', () => clearVideo('Видео убрано из приложения. Файл остался на диске'));
-el.removeTrash.addEventListener('click', async () => {
-  const res = await api.trash(state.input);
-  if (res.ok) clearVideo('Файл отправлен в корзину');
-  else setStatus(res.error, 'error');
+  if (state.busy) showProgress(p);
 });
 
 function showProgress({ value, label }) {
@@ -205,30 +297,19 @@ function hideProgress() {
   el.barFill.style.transform = 'scaleX(0)';
 }
 
-// Прогресс чужого (отменённого) анализа не показываем.
-api.onProgress((p) => {
-  if (p.stage === 'analyze' && !state.analyzing && !state.busy) return;
-  showProgress(p);
-});
+// ---- Выбор и перетаскивание ----
 
-// Выбор и перетаскивание файла
 async function pick() {
-  const file = await api.pickVideo();
-  if (!file.ok || !file.data) return;
-  loadFile(file.data);
+  const res = await api.pickVideos();
+  if (res.ok && res.data) loadFiles(res.data);
 }
-
 el.drop.addEventListener('click', pick);
 el.drop.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
 });
-el.fileChange.addEventListener('click', pick);
 
 ['dragenter', 'dragover'].forEach((type) =>
-  document.addEventListener(type, (e) => {
-    e.preventDefault();
-    if (!state.busy) el.drop.classList.add('over');
-  })
+  document.addEventListener(type, (e) => { e.preventDefault(); el.drop.classList.add('over'); })
 );
 ['dragleave', 'drop'].forEach((type) =>
   document.addEventListener(type, (e) => {
@@ -238,11 +319,9 @@ el.fileChange.addEventListener('click', pick);
   })
 );
 document.addEventListener('drop', (e) => {
-  if (state.busy) return;
-  const dropped = e.dataTransfer && e.dataTransfer.files[0];
-  if (!dropped) return;
-  const file = api.pathForFile(dropped);
-  if (file) loadFile(file);
+  const dropped = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
+  const paths = dropped.map((f) => api.pathForFile(f)).filter(Boolean);
+  if (paths.length) loadFiles(paths);
 });
 
 el.outChange.addEventListener('click', async () => {
@@ -250,40 +329,59 @@ el.outChange.addEventListener('click', async () => {
   if (res.ok && res.data) { state.outDir = res.data; refresh(); }
 });
 
-// Загрузка по ссылке: скачалось, дальше сразу анализ звука, потом параметры.
-el.urlForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const url = el.url.value.trim();
-  if (!url || state.busy) return;
-  stopAnalysis();
-  state.busy = true;
-  refresh();
-  el.run.disabled = false;
-  setStatus('');
-  showProgress({ value: null, label: 'Готовлю загрузчик' });
-  const res = await api.download(url, state.outDir);
-  state.busy = false;
-  hideProgress();
+// ---- Загрузка по ссылкам: каждая идёт отдельной задачей, до трёх одновременно ----
+
+function parseUrls(text) {
+  const found = text.split(/[\s,]+/).filter((s) => /^https?:\/\//i.test(s));
+  return Array.from(new Set(found));
+}
+
+async function downloadOne(item) {
+  const res = await api.download(item.id, item.url, state.outDir);
+  if (!find(item.id)) return;
   if (res.ok) {
-    el.url.value = '';
-    setVideo({
-      file: res.data.file, duration: res.data.duration, name: res.data.name,
-      audioStreams: res.data.audioStreams, downloaded: res.data.downloaded,
-    });
+    addReady(res.data, item);
+  } else if (res.cancelled) {
+    state.items = state.items.filter((i) => i !== item);
+    const li = itemNodes.get(item.id);
+    if (li) li.remove();
+    itemNodes.delete(item.id);
+    refresh();
   } else {
-    setStatus(res.cancelled ? 'Отменено' : res.error, res.cancelled ? '' : 'error');
-    if (state.input) startAnalysis(); // прежнее видео остаётся, дослушиваем его
-    else refresh();
+    item.phase = 'error';
+    item.error = res.error;
+    item.value = undefined;
+    refresh();
   }
+}
+
+el.urlForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const urls = parseUrls(el.urls.value);
+  if (!urls.length) {
+    setStatus(el.urls.value.trim() ? 'Нужны ссылки, которые начинаются с http:// или https://' : '', el.urls.value.trim() ? 'error' : '');
+    return;
+  }
+  setStatus('');
+  el.urls.value = '';
+  for (const url of urls) {
+    const item = {
+      id: String(state.nextId++), url, name: url, phase: 'queued', label: 'В очереди', value: null,
+      selected: true, analysis: 'none', audioStreams: 1, duration: 0, downloaded: true, error: '',
+    };
+    state.items.push(item);
+    downloadOne(item);
+  }
+  refresh();
 });
 
-// Нарезка и отмена
+// ---- Нарезка ----
+
 el.run.addEventListener('click', async () => {
   if (state.busy) { await api.cancel(); return; }
-  if (state.analyzing) { // режим «подряд» анализа не ждёт
-    state.token += 1;
-    state.analyzing = false;
-  }
+  const picked = selectedItems();
+  if (!picked.length) return;
+
   state.busy = true;
   refresh();
   el.run.disabled = false;
@@ -291,14 +389,11 @@ el.run.addEventListener('click', async () => {
   setStatus('');
   showProgress({ value: 0, label: 'Начинаю' });
 
-  const res = await api.run({
-    input: state.input,
-    outDir: state.outDir,
-    mode: getMode(),
-    clipLen: getLen(),
-    count: Number(el.count.value),
-    fast: el.fast.checked,
-  });
+  const mode = getMode();
+  const res = await api.run(
+    picked.map((i) => ({ id: i.id, file: i.file })),
+    { outDir: state.outDir, mode, clipLen: getLen(), count: Number(el.count.value), fast: el.fast.checked }
+  );
 
   state.busy = false;
   hideProgress();
@@ -308,18 +403,22 @@ el.run.addEventListener('click', async () => {
     setStatus(res.cancelled ? 'Отменено' : res.error, res.cancelled ? '' : 'error');
     return;
   }
-  renderResults(res.data);
+  // Анализ после нарезки лежит в кэше: помечаем видео как проанализированные.
+  picked.forEach((i) => { if (i.audioStreams > 0 && mode !== 'fixed') i.analysis = 'done'; });
+  refresh();
+  renderResults(res.data, picked.length > 1);
 });
 
 const AUDIO_WARN = { partial: 'звук пропадает', none: 'нет звука' };
 
-function renderResults(data) {
+function renderResults(data, multi) {
   state.last = data;
   if (!data.clips.length) {
     setStatus(data.note || 'Клипов нет');
     return;
   }
-  el.resultsTitle.textContent = `Готово: ${data.clips.length} ${plural(data.clips.length)}`;
+  const n = data.clips.length;
+  el.resultsTitle.textContent = `Готово: ${n} ${plural(n, 'клип', 'клипа', 'клипов')}`;
   el.resultsList.replaceChildren(
     ...data.clips.map((c, i) => {
       const li = document.createElement('li');
@@ -327,6 +426,8 @@ function renderResults(data) {
       li.append(
         cell('idx num', String(c.index).padStart(2, '0')),
         cell('time', `${clock(c.start)} – ${clock(c.end)}`),
+        cell('vid', multi && c.video ? c.video : ''),
+        cell('tag', c.tag || ''),
         cell('warn', AUDIO_WARN[c.audio] || ''),
         cell('score', c.score ? `+${c.score} дБ` : '')
       );
@@ -336,13 +437,6 @@ function renderResults(data) {
   el.results.hidden = false;
   const hasWarn = data.clips.some((c) => c.audio !== 'ok');
   setStatus(data.note || 'Клипы сохранены', data.note ? (hasWarn ? 'error' : '') : 'ok');
-}
-
-function plural(n) {
-  const a = n % 10, b = n % 100;
-  if (a === 1 && b !== 11) return 'клип';
-  if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return 'клипа';
-  return 'клипов';
 }
 
 function cell(cls, text) {
@@ -358,7 +452,9 @@ el.openFolder.addEventListener('click', () => {
 
 el.copyTimes.addEventListener('click', async () => {
   if (!state.last) return;
-  const text = state.last.clips.map((c) => `${clock(c.start)} - ${clock(c.end)}`).join('\n');
+  const text = state.last.clips
+    .map((c) => `${c.video ? c.video + ' ' : ''}${clock(c.start)} - ${clock(c.end)}`)
+    .join('\n');
   try {
     await navigator.clipboard.writeText(text);
     setStatus('Таймкоды скопированы', 'ok');
@@ -367,11 +463,25 @@ el.copyTimes.addEventListener('click', async () => {
   }
 });
 
-document.querySelectorAll('input[name="mode"], input[name="len"]').forEach((i) => i.addEventListener('change', refresh));
+// Смена режима меняет диапазон ползунка: для «Лучших» это 3–30, для «Всех реакций» 3–100.
+let lastCountMode = 'top';
+function applyCountMode() {
+  const mode = getMode();
+  if (mode === 'fixed' || mode === lastCountMode) return;
+  const c = COUNT[mode];
+  el.count.min = c.min;
+  el.count.max = c.max;
+  el.count.value = c.value;
+  el.countLabel.textContent = c.label;
+  lastCountMode = mode;
+}
+document.querySelectorAll('input[name="mode"]').forEach((i) => i.addEventListener('change', () => { applyCountMode(); refresh(); }));
+document.querySelectorAll('input[name="len"]').forEach((i) => i.addEventListener('change', refresh));
 el.count.addEventListener('input', refresh);
 
 (async function init() {
   const d = await api.defaults();
   if (d.ok) state.outDir = d.data.outDir;
+  el.countLabel.textContent = COUNT.top.label;
   refresh();
 })();

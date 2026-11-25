@@ -5,17 +5,25 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 
 const { Job } = require('./job');
+const { Semaphore } = require('./queue');
 const tools = require('./tools');
-const { runPipeline, probeMedia, analyzeVideo } = require('./pipeline');
-const { downloadVideo } = require('./downloader');
+const { runBatch, probeMedia, analyzeVideo } = require('./pipeline');
+const { downloadInto } = require('./downloader');
 
 let win = null;
-let currentJob = null;
+let runJob = null; // идущая нарезка: одновременно только одна
+
+// Загрузки и анализ идут по номеру видео, их можно отменять по одной.
+const tasks = new Map();
+const downloadSlots = new Semaphore(3); // до трёх загрузок одновременно, остальные в очереди
+const analysisSlots = new Semaphore(1); // анализ нагружает процессор, поэтому по одному
+
 // Файлы, которые скачало само приложение. Только их разрешено отправлять в корзину.
 const downloaded = new Set();
+
 // Результат анализа звука по файлу: после него параметры нарезки меняются мгновенно.
 const analysisCache = new Map();
-const CACHE_LIMIT = 5;
+const CACHE_LIMIT = 30;
 
 function cacheKey(file) {
   const st = fs.statSync(file);
@@ -37,12 +45,24 @@ function storeAnalysis(file, analysis) {
   while (analysisCache.size > CACHE_LIMIT) analysisCache.delete(analysisCache.keys().next().value);
 }
 
+// yt-dlp готовим один раз, а не по разу на каждую параллельную загрузку.
+let ytdlpReady = null;
+function getYtDlp() {
+  if (!ytdlpReady) {
+    ytdlpReady = tools.ensureYtDlp(app.getPath('userData')).catch((err) => {
+      ytdlpReady = null;
+      throw err;
+    });
+  }
+  return ytdlpReady;
+}
+
 function createWindow() {
   win = new BrowserWindow({
-    width: 880,
-    height: 760,
-    minWidth: 640,
-    minHeight: 620,
+    width: 940,
+    height: 820,
+    minWidth: 700,
+    minHeight: 640,
     backgroundColor: '#0e0e10',
     autoHideMenuBar: true,
     title: 'Clipper',
@@ -80,22 +100,26 @@ function handle(channel, fn) {
   });
 }
 
-// Анализ звука идёт в фоне и уступает место любой новой работе (скачать, нарезать).
-function startJob(kind) {
-  if (currentJob && currentJob.kind === 'analyze') currentJob.cancel();
-  else if (currentJob) throw new Error('Уже идёт работа, дождись конца или нажми «Отмена»');
-  currentJob = new Job();
-  currentJob.kind = kind;
-  return currentJob;
-}
-
-function endJob(job) {
-  if (currentJob === job) currentJob = null;
-}
-
 function requireString(value, name) {
   if (typeof value !== 'string' || !value) throw new Error(`Не указан параметр: ${name}`);
   return value;
+}
+
+function requireFile(file) {
+  requireString(file, 'file');
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error('Файл не найден');
+  return file;
+}
+
+// Регистрирует задачу под ключом, чтобы её можно было отменить, и снимает регистрацию в конце.
+async function withTask(key, fn) {
+  const job = new Job();
+  tasks.set(key, job);
+  try {
+    return await fn(job);
+  } finally {
+    if (tasks.get(key) === job) tasks.delete(key);
+  }
 }
 
 handle('app:defaults', async () => ({
@@ -105,13 +129,13 @@ handle('app:defaults', async () => ({
 handle('dialog:video', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Выбери видео',
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
     filters: [
       { name: 'Видео', extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'flv', 'ts', 'm4v', 'wmv'] },
       { name: 'Все файлы', extensions: ['*'] },
     ],
   });
-  return res.canceled ? null : res.filePaths[0];
+  return res.canceled ? null : res.filePaths;
 });
 
 handle('dialog:folder', async () => {
@@ -123,33 +147,76 @@ handle('dialog:folder', async () => {
 });
 
 handle('video:probe', async (input) => {
-  requireString(input, 'input');
-  if (!fs.existsSync(input) || !fs.statSync(input).isFile()) throw new Error('Файл не найден');
+  requireFile(input);
   const { duration, audioStreams } = await probeMedia({ job: new Job(), ffprobePath: tools.ffprobePath(), input });
   return { duration, audioStreams, name: path.basename(input), downloaded: downloaded.has(input) };
 });
 
 // Слушает звук один раз и запоминает результат. Если он уже есть, отвечает сразу.
-handle('video:analyze', async (input) => {
-  requireString(input, 'input');
-  if (!fs.existsSync(input) || !fs.statSync(input).isFile()) throw new Error('Файл не найден');
-  const cached = cachedAnalysis(input);
+handle('video:analyze', async ({ id, file }) => {
+  requireFile(file);
+  const cached = cachedAnalysis(file);
   if (cached) return { duration: cached.duration, audioStreams: cached.audioStreams };
-  const job = startJob('analyze');
-  try {
-    send('job:progress', { stage: 'analyze', value: 0, label: 'Слушаю звук' });
-    const info = await analyzeVideo({
-      job,
-      ffmpegPath: tools.ffmpegPath(),
-      ffprobePath: tools.ffprobePath(),
-      input,
-      onProgress: (value) => send('job:progress', { stage: 'analyze', value, label: 'Слушаю звук' }),
-    });
-    storeAnalysis(input, info);
-    return { duration: info.duration, audioStreams: info.audioStreams };
-  } finally {
-    endJob(job);
+  return withTask(`an:${id}`, async (job) => {
+    send('job:progress', { id, stage: 'analyze', value: null, label: 'В очереди на анализ' });
+    const release = await analysisSlots.acquire(job);
+    try {
+      send('job:progress', { id, stage: 'analyze', value: 0, label: 'Слушаю звук' });
+      const info = await analyzeVideo({
+        job,
+        ffmpegPath: tools.ffmpegPath(),
+        ffprobePath: tools.ffprobePath(),
+        input: file,
+        onProgress: (value) => send('job:progress', { id, stage: 'analyze', value, label: 'Слушаю звук' }),
+      });
+      storeAnalysis(file, info);
+      return { duration: info.duration, audioStreams: info.audioStreams };
+    } finally {
+      release();
+    }
+  });
+});
+
+// Несколько ссылок можно запускать сразу: параллельно идут три, остальные ждут своей очереди.
+handle('video:download', async ({ id, url, outDir }) => {
+  requireString(url, 'url');
+  requireString(outDir, 'outDir');
+  return withTask(`dl:${id}`, async (job) => {
+    send('job:progress', { id, stage: 'download', value: null, label: 'В очереди' });
+    const release = await downloadSlots.acquire(job);
+    try {
+      send('job:progress', { id, stage: 'download', value: null, label: 'Готовлю загрузчик' });
+      const ytdlp = await getYtDlp();
+      job.throwIfCancelled();
+      const { file, title } = await downloadInto({
+        job,
+        tools: ytdlp,
+        url,
+        outDir,
+        id,
+        onProgress: (value) => send('job:progress', { id, stage: 'download', value, label: 'Скачиваю видео' }),
+      });
+      try {
+        const { duration, audioStreams } = await probeMedia({ job, ffprobePath: tools.ffprobePath(), input: file });
+        downloaded.add(file);
+        return { file, duration, audioStreams, name: title || path.basename(file), downloaded: true };
+      } catch (err) {
+        if (job.cancelled) fs.rmSync(file, { force: true }); // отменили в последний момент: файл не оставляем
+        throw err;
+      }
+    } finally {
+      release();
+    }
+  });
+});
+
+// Отменяет загрузку или анализ конкретного видео (или обе задачи сразу).
+handle('task:cancel', async (id) => {
+  for (const key of [`dl:${id}`, `an:${id}`]) {
+    const job = tasks.get(key);
+    if (job) job.cancel();
   }
+  return true;
 });
 
 // Убрать видео из приложения можно всегда (это делает интерфейс сам).
@@ -163,50 +230,32 @@ handle('video:trash', async (file) => {
   return true;
 });
 
-handle('video:download', async ({ url, outDir }) => {
-  requireString(url, 'url');
-  requireString(outDir, 'outDir');
-  const job = startJob('download');
-  try {
-    send('job:progress', { stage: 'download', value: 0, label: 'Готовлю загрузчик' });
-    const ytdlp = await tools.ensureYtDlp(app.getPath('userData'));
-    const { file, title } = await downloadVideo({
-      job,
-      tools: ytdlp,
-      url,
-      outDir,
-      onProgress: (value) => send('job:progress', { stage: 'download', value, label: 'Скачиваю видео' }),
-    });
-    const { duration, audioStreams } = await probeMedia({ job, ffprobePath: tools.ffprobePath(), input: file });
-    downloaded.add(file);
-    return { file, duration, audioStreams, name: title || path.basename(file), downloaded: true };
-  } finally {
-    endJob(job);
-  }
-});
+handle('job:run', async ({ videos, options }) => {
+  if (runJob) throw new Error('Нарезка уже идёт, дождись конца или нажми «Отмена»');
+  if (!Array.isArray(videos) || videos.length === 0) throw new Error('Не выбрано видео');
+  videos.forEach((v) => requireFile(v && v.file));
 
-handle('job:run', async (options) => {
-  const job = startJob('run');
+  const job = new Job();
+  runJob = job;
   try {
-    const input = options && options.input;
-    const exists = typeof input === 'string' && fs.existsSync(input);
-    const { analysis, ...result } = await runPipeline({
+    const result = await runBatch({
       job,
       ffmpegPath: tools.ffmpegPath(),
       ffprobePath: tools.ffprobePath(),
+      videos: videos.map((v) => ({ id: v.id, input: v.file, analysis: cachedAnalysis(v.file) })),
       options,
-      analysis: exists ? cachedAnalysis(input) : undefined,
       onProgress: (p) => send('job:progress', p),
     });
-    if (exists && analysis) storeAnalysis(input, analysis);
-    return result; // сам анализ в интерфейс не отдаём: он большой и ему там нечего делать
+    result.analyses.forEach((info, i) => storeAnalysis(videos[i].file, info));
+    const { analyses, ...rest } = result; // сам анализ в интерфейс не отдаём: он большой и ему там нечего делать
+    return rest;
   } finally {
-    endJob(job);
+    if (runJob === job) runJob = null;
   }
 });
 
 handle('job:cancel', async () => {
-  if (currentJob) currentJob.cancel();
+  if (runJob) runJob.cancel();
   return true;
 });
 
@@ -226,6 +275,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (currentJob) currentJob.cancel();
+  if (runJob) runJob.cancel();
+  for (const job of tasks.values()) job.cancel();
   if (process.platform !== 'darwin') app.quit();
 });

@@ -115,4 +115,25 @@ async function downloadVideo({ job, tools, url, outDir, onProgress }) {
   return { file: filePath, title };
 }
 
-module.exports = { downloadVideo, assertHttpUrl, newestVideoSince };
+/**
+ * Скачивает в отдельную временную папку и только потом переносит файл в outDir.
+ * Так несколько загрузок одновременно не мешают друг другу (запасной поиск файла
+ * видит только свою папку), а при отмене или ошибке остатки загрузки удаляются.
+ */
+async function downloadInto({ job, tools, url, outDir, id, onProgress }) {
+  fs.mkdirSync(outDir, { recursive: true });
+  const tmp = path.join(outDir, `.clipper-dl-${String(id).replace(/[^\w-]/g, '')}`);
+  fs.mkdirSync(tmp, { recursive: true });
+  try {
+    const { file, title } = await downloadVideo({ job, tools, url, outDir: tmp, onProgress });
+    const parsed = path.parse(file);
+    let dest = path.join(outDir, parsed.base);
+    for (let n = 2; fs.existsSync(dest); n++) dest = path.join(outDir, `${parsed.name}_${n}${parsed.ext}`);
+    fs.renameSync(file, dest);
+    return { file: dest, title };
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+module.exports = { downloadVideo, downloadInto, assertHttpUrl, newestVideoSince };

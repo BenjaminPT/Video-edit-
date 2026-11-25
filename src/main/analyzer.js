@@ -138,20 +138,16 @@ function prefixSums(values) {
 }
 
 /**
- * Ищет моменты, где стример реагирует: голос резко выше обычного (крик, смех, эмоция).
- *
- * Правила:
- * 1. Считаем только голосовой диапазон. Громкая музыка и взрывы без голоса не в счёт.
- * 2. Пик сравниваем с обычным уровнем голоса за ~3 минуты вокруг, а не с абсолютным порогом.
- * 3. Вокруг момента должна быть речь: клип, где звука почти нет (тишина, заглушённая
- *    музыка в записи Twitch), отбрасывается, даже если там есть один громкий хлопок.
- * 4. Клипы не пересекаются. Если строгих моментов меньше заказанного числа,
- *    добираем более мягкими.
+ * Кандидаты на момент: каждая секунда, где голос выше обычного уровня.
+ * Для каждой считаем окно клипа, долю секунд с речью, долю голоса в общем звуке
+ * и «затяжность» подъёма (смех и долгая реакция держатся дольше, чем одиночный крик).
+ * sigma: типичный разброс уровня голоса в этой записи (устойчивая оценка по MAD);
+ * по нему оценки из разных видео становятся сравнимыми.
  */
-function findHighlights(profile, { clipLen, count, duration, preRoll = 0.35 }) {
+function buildCandidates(profile, { clipLen, duration, preRoll = 0.35 }) {
   const { total, voice } = profile;
   const n = voice.length;
-  if (n === 0 || duration < 1) return [];
+  if (n === 0 || duration < 1) return { candidates: [], sigma: 1 };
 
   const smooth = movingAverage(voice, 1); // ~3 секунды
   const baseline = rollingMedian(voice, 90); // ~3 минуты
@@ -163,32 +159,59 @@ function findHighlights(profile, { clipLen, count, duration, preRoll = 0.35 }) {
 
   const active = new Float32Array(n);
   const share = new Float32Array(n); // доля голоса в общем звуке: 0 дБ = только голос, -20 дБ = в основном музыка
+  const diff = new Float32Array(n); // насколько голос выше обычного
   for (let i = 0; i < n; i++) {
     active[i] = voice[i] >= speechFloor ? 1 : 0;
     share[i] = Math.max(-20, Math.min(0, voice[i] - total[i]));
+    diff[i] = smooth[i] - baseline[i];
   }
   const activeSum = prefixSums(active);
   const shareSum = prefixSums(share);
+  const diffSum = prefixSums(diff);
+
+  const sorted = Array.from(diff).sort((a, b) => a - b);
+  const mid = median(sorted);
+  const deviations = sorted.map((v) => Math.abs(v - mid)).sort((a, b) => a - b);
+  const sigma = Math.max(1, 1.4826 * median(deviations));
 
   const maxStart = Math.max(0, duration - clipLen);
   const candidates = [];
   for (let i = 0; i < n; i++) {
-    const spike = voice[i] >= speechFloor ? smooth[i] - baseline[i] : 0;
+    const spike = voice[i] >= speechFloor ? diff[i] : 0;
     if (spike <= 0) continue;
     const start = Math.min(maxStart, Math.max(0, Math.round(i - clipLen * preRoll)));
     const end = Math.min(duration, start + clipLen);
     const from = Math.floor(start);
     const to = Math.min(n, Math.ceil(end));
     const len = Math.max(1, to - from);
+    const tail = Math.min(n, i + 8);
     candidates.push({
       peak: i,
       spike,
+      sustain: Math.max(0, (diffSum[tail] - diffSum[i]) / Math.max(1, tail - i)),
       start,
       end,
       activeFrac: (activeSum[to] - activeSum[from]) / len,
       voiceShare: (shareSum[to] - shareSum[from]) / len,
     });
   }
+  return { candidates, sigma };
+}
+
+/**
+ * Режим «все реакции»: до count моментов, где голос резко выше обычного (крик, смех, эмоция).
+ *
+ * Правила:
+ * 1. Считаем только голосовой диапазон. Громкая музыка и взрывы без голоса не в счёт.
+ * 2. Пик сравниваем с обычным уровнем голоса за ~3 минуты вокруг, а не с абсолютным порогом.
+ * 3. Вокруг момента должна быть речь: клип, где звука почти нет (тишина, заглушённая
+ *    музыка в записи Twitch), отбрасывается, даже если там есть один громкий хлопок.
+ * 4. Клипы не пересекаются. Если строгих моментов меньше заказанного числа,
+ *    добираем более мягкими.
+ */
+function findHighlights(profile, { clipLen, count, duration, preRoll = 0.35 }) {
+  const { candidates } = buildCandidates(profile, { clipLen, duration, preRoll });
+  if (candidates.length === 0) return [];
 
   const passes = [
     { minSpike: 3, minActive: 0.6 },
@@ -219,6 +242,70 @@ function findHighlights(profile, { clipLen, count, duration, preRoll = 0.35 }) {
     }));
 }
 
+/**
+ * Режим «лучшие»: оцениваем кандидатов одним числом, чтобы сравнивать их между собой
+ * и между разными видео.
+ *
+ * Оценка = (0.6 * резкость подъёма + 0.4 * затяжность) * поправка на речь и музыку,
+ * где резкость и затяжность измерены в «типичных разбросах» голоса этой записи (z, не выше 6).
+ * Поправка снижает оценку там, где речи мало или голос тонет в музыке.
+ * Веса стартовые и выбраны по результатам исследования других сервисов, а не обучены
+ * на разметке: настоящих формул никто из них не публикует.
+ */
+function rankCandidates(profile, { clipLen, duration, preRoll = 0.35 }) {
+  const { candidates, sigma } = buildCandidates(profile, { clipLen, duration, preRoll });
+  const out = [];
+  for (const c of candidates) {
+    const spikeZ = Math.min(6, c.spike / sigma);
+    const sustainZ = Math.min(6, c.sustain / sigma);
+    if (c.spike < 3 || spikeZ < 2 || c.activeFrac < 0.6) continue;
+    const gate = (0.5 + 0.5 * c.activeFrac) * (1 + c.voiceShare / 40);
+    const score = (0.6 * spikeZ + 0.4 * sustainZ) * gate;
+    let tag = 'громкая речь';
+    if (sustainZ >= 2) tag = 'долгая реакция';
+    else if (spikeZ >= 3.5) tag = 'резкий всплеск голоса';
+    out.push({
+      start: c.start,
+      end: c.end,
+      peak: c.peak,
+      score: Math.round(score * 10) / 10,
+      tag,
+    });
+  }
+  return out;
+}
+
+/**
+ * Выбирает лучшие count моментов из кандидатов (possibly нескольких видео, поле videoId).
+ * Правила: от лучшего к худшему; клипы одного видео не пересекаются и их пики
+ * не ближе minGap секунд; не больше perBucket клипов на каждые bucketSec секунд видео,
+ * чтобы топ не состоял из одной горячей минуты. Если строгих не хватило, добираем без этой квоты.
+ * Возвращает список по убыванию рейтинга с полем rank.
+ */
+function pickTop(entries, { count, minGap = 60, bucketSec = 900, perBucket = 2 }) {
+  const sorted = [...entries].sort((a, b) => b.score - a.score);
+  const picked = [];
+  const used = new Set();
+  const perBucketCount = new Map();
+  const bucketKey = (c) => `${c.videoId}:${Math.floor(c.peak / bucketSec)}`;
+  const conflicts = (c) =>
+    picked.some(
+      (p) => p.videoId === c.videoId && ((c.start < p.end && c.end > p.start) || Math.abs(c.peak - p.peak) < minGap)
+    );
+
+  for (const strict of [true, false]) {
+    for (const c of sorted) {
+      if (picked.length >= count) break;
+      if (used.has(c) || conflicts(c)) continue;
+      if (strict && (perBucketCount.get(bucketKey(c)) || 0) >= perBucket) continue;
+      picked.push(c);
+      used.add(c);
+      perBucketCount.set(bucketKey(c), (perBucketCount.get(bucketKey(c)) || 0) + 1);
+    }
+  }
+  return picked.map((c, i) => ({ ...c, rank: i + 1 }));
+}
+
 // Режим «подряд»: без пропусков. Хвост короче 3 секунд отбрасываем.
 function fixedSegments(duration, clipLen) {
   const out = [];
@@ -229,4 +316,4 @@ function fixedSegments(duration, clipLen) {
   return out;
 }
 
-module.exports = { computeProfile, findHighlights, fixedSegments, rollingMedian, buildAnalysisGraph };
+module.exports = { computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments, rollingMedian, buildAnalysisGraph };

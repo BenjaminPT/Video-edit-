@@ -21,42 +21,30 @@
           <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>
         </svg>
         <span class="drop-title">Перетащи видео сюда</span>
-        <span id="drop-hint" class="hint">или нажми, чтобы выбрать файл</span>
+        <span id="drop-hint" class="hint">или нажми, чтобы выбрать файлы (можно несколько)</span>
       </div>
 
-      <div id="file" class="file" hidden>
-        <div class="file-info">
-          <span id="file-name" class="file-name"></span>
-          <span id="file-meta" class="hint"></span>
-        </div>
-        <div class="file-actions">
-          <button id="file-change" class="btn ghost" type="button">Сменить</button>
-          <button id="file-remove" class="btn ghost" type="button">Убрать</button>
-        </div>
-      </div>
-
-      <div id="remove-confirm" class="confirm" hidden role="group" aria-labelledby="remove-title">
-        <span id="remove-title">Это видео скачало приложение. Что сделать с файлом?</span>
-        <div class="confirm-actions">
-          <button id="remove-keep" class="btn ghost" type="button">Оставить на диске</button>
-          <button id="remove-trash" class="btn ghost danger" type="button">В корзину</button>
-          <button id="remove-cancel" class="btn ghost" type="button">Отмена</button>
-        </div>
-      </div>
-
-      <form id="url-form" class="url-row" autocomplete="off" novalidate>
-        <label class="sr-only" for="url">Ссылка на видео</label>
-        <input id="url" type="text" inputmode="url" placeholder="Или вставь ссылку на видео" spellcheck="false">
+      <form id="url-form" class="url-form" autocomplete="off" novalidate>
+        <label class="sr-only" for="urls">Ссылки на видео</label>
+        <textarea id="urls" rows="2" placeholder="Или вставь ссылки на видео: по одной на строку, скачаются одновременно" spellcheck="false"></textarea>
         <button id="url-go" class="btn secondary" type="submit">Скачать</button>
       </form>
+
+      <div id="library" class="library" hidden>
+        <div class="library-head">
+          <label class="check-all"><input id="select-all" type="checkbox"><span id="library-title">Видео</span></label>
+        </div>
+        <ul id="library-list" class="library-list"></ul>
+      </div>
     </section>
 
     <section class="block settings" aria-label="Настройки">
       <fieldset class="field">
         <legend>Режим</legend>
-        <div class="seg n2">
+        <div class="seg n3">
           <span class="thumb" aria-hidden="true"></span>
-          <label><input type="radio" name="mode" value="smart" checked><span>По звуку</span></label>
+          <label><input type="radio" name="mode" value="top" checked><span>Лучшие</span></label>
+          <label><input type="radio" name="mode" value="smart"><span>Все реакции</span></label>
           <label><input type="radio" name="mode" value="fixed"><span>Подряд</span></label>
         </div>
         <p id="mode-hint" class="hint"></p>
@@ -74,10 +62,10 @@
 
       <div id="count-field" class="field">
         <div class="field-row">
-          <label for="count">Сколько клипов</label>
-          <output id="count-out" for="count">15</output>
+          <label for="count" id="count-label">Сколько клипов</label>
+          <output id="count-out" for="count">10</output>
         </div>
-        <input id="count" type="range" min="3" max="100" step="1" value="15">
+        <input id="count" type="range" min="3" max="30" step="1" value="10">
       </div>
 
       <label class="check">

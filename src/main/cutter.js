@@ -115,21 +115,23 @@ async function checkAudio({ job, ffmpegPath, file, length }) {
 }
 
 /**
- * Режет сегменты по очереди и проверяет звук в каждом клипе.
+ * Режет клипы по плану и проверяет звук в каждом.
+ * plan: [{ input, seg: {start, end, score?}, audioStreams, name, meta? }], name = имя файла клипа.
  * fast = true: видео без перекодирования (быстро, границы по ключевым кадрам).
  * fast = false: видео перекодируется (точнее, работает везде).
  * Если звук в клипе пропал, клип режется заново запасным способом; если и это не помогло,
- * в результате у клипа остаётся отметка audio: 'partial' или 'none'.
+ * у клипа остаётся отметка audio: 'partial' или 'none'.
+ * onProgress(доля, сделано, всего)
  */
-async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, audioStreams = 1, onProgress }) {
-  const base = safeName(path.parse(input).name);
-  const folder = uniqueDir(outDir, `${base}_clips`);
+async function cutPlan({ job, ffmpegPath, plan, folder, fast, onProgress }) {
+  fs.mkdirSync(folder, { recursive: true });
   const clips = [];
 
-  for (let i = 0; i < segments.length; i++) {
+  for (let i = 0; i < plan.length; i++) {
     job.throwIfCancelled();
-    const seg = segments[i];
-    const file = path.join(folder, `${base}_${pad(i + 1)}_${clockForFile(seg.start)}.mp4`);
+    const { input, seg, name, meta } = plan[i];
+    const audioStreams = plan[i].audioStreams === undefined ? 1 : plan[i].audioStreams;
+    const file = path.join(folder, name);
     const length = seg.end - seg.start;
 
     let audio = audioStreams > 0 ? 'ok' : 'none';
@@ -143,8 +145,8 @@ async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, audioS
       if (audio === 'ok') break;
     }
 
-    clips.push({ index: i + 1, start: seg.start, end: seg.end, file, score: seg.score, audio });
-    if (onProgress) onProgress((i + 1) / segments.length, i + 1, segments.length);
+    clips.push({ index: i + 1, start: seg.start, end: seg.end, file, score: seg.score, audio, ...meta });
+    if (onProgress) onProgress((i + 1) / plan.length, i + 1, plan.length);
   }
 
   const mark = { ok: '', partial: '  [звук пропадает]', none: '  [нет звука]' };
@@ -152,8 +154,18 @@ async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, audioS
     (c) => `${pad(c.index)}  ${clock(c.start)} - ${clock(c.end)}  ${path.basename(c.file)}${mark[c.audio]}`
   );
   fs.writeFileSync(path.join(folder, 'timecodes.txt'), lines.join('\n') + '\n', 'utf8');
-
   return { folder, clips };
 }
 
-module.exports = { cutClips, clock, buildCutArgs, checkAudio };
+/** Нарезка одного видео по списку отрезков в новую папку «<имя>_clips». */
+async function cutClips({ job, ffmpegPath, input, segments, outDir, fast, audioStreams = 1, onProgress }) {
+  const base = safeName(path.parse(input).name);
+  const folder = uniqueDir(outDir, `${base}_clips`);
+  const plan = segments.map((seg, i) => ({
+    input, seg, audioStreams,
+    name: `${base}_${pad(i + 1)}_${clockForFile(seg.start)}.mp4`,
+  }));
+  return cutPlan({ job, ffmpegPath, plan, folder, fast, onProgress });
+}
+
+module.exports = { cutClips, cutPlan, clock, clockForFile, safeName, uniqueDir, pad, buildCutArgs, checkAudio };

@@ -14,6 +14,14 @@ class Job {
   constructor() {
     this.cancelled = false;
     this.children = new Set();
+    this.cancelHooks = [];
+  }
+
+  // Вызывает fn при отмене (или сразу, если уже отменено). Нужно очереди, чтобы
+  // ожидающая задача могла выйти из неё по отмене.
+  onCancel(fn) {
+    if (this.cancelled) fn();
+    else this.cancelHooks.push(fn);
   }
 
   throwIfCancelled() {
@@ -53,7 +61,9 @@ class Job {
   }
 
   cancel() {
+    if (this.cancelled) return;
     this.cancelled = true;
+    for (const fn of this.cancelHooks.splice(0)) fn();
     for (const child of this.children) {
       try {
         child.kill();
