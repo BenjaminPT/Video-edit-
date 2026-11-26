@@ -132,6 +132,7 @@ legend, .field-label, .field-row label {
 }
 .seg.n2 { grid-template-columns: repeat(2, 1fr); --n: 2; }
 .seg.n3 { grid-template-columns: repeat(3, 1fr); --n: 3; }
+.seg.n4 { grid-template-columns: repeat(4, 1fr); --n: 4; }
 .seg.n5 { grid-template-columns: repeat(5, 1fr); --n: 5; }
 .seg label { position: relative; z-index: 1; cursor: pointer; }
 .seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
@@ -290,3 +291,16 @@ input[type="color"] { width: 48px; height: 32px; padding: 2px; background: var(-
   .trim { grid-template-columns: 1fr; }
   .seg.n5 span:not(.thumb) { font-size: 12px; }
 }
+
+.render-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+.sel-field { display: flex; flex-direction: column; min-width: 0; }
+select {
+  font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 0 12px; min-height: 40px; width: 100%; cursor: pointer;
+}
+select:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+fieldset > .seg, fieldset > .field-label { margin-top: 0; }
+fieldset > .field-label:not(:first-child) { display: block; margin-top: 14px; }
+#m-ov-box[hidden], #m-ov-chroma-box[hidden], #m-ov-clear[hidden], #m-h265-wrap[hidden], #m-hw-wrap[hidden] { display: none; }
+#m-h265-wrap, #m-hw-wrap { margin-top: 14px; }
+@media (max-width: 520px) { .render-grid { grid-template-columns: 1fr; } }

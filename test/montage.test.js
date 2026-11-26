@@ -134,6 +134,42 @@ function run(project, name) {
   });
   assert.ok(url2.length > 1000, 'кадр предпросмотра с хромакеем');
 
+  // 7b. Накладка: фото и видео с хромакеем, масштаб и позиция
+  ff(['-f', 'lavfi', '-i', 'color=c=yellow:s=400x400:d=1', '-frames:v', '1', P('logo.png')], 'логотип');
+  r = await run({ aspect: '16:9', fit: 'fit', clips: [{ ...base, overlay: { file: P('logo.png'), scale: 20, posX: 1, posY: 0, opacity: 1 } }] }, 'r7.mp4');
+  i = await info(r.out);
+  assert.strictEqual(`${i.width}x${i.height}`, '1920x1080');
+  const tr = frameColors(r.out, 1860, 20); // правый верхний угол, там логотип
+  const bl = frameColors(r.out, 20, 1000);
+  assert.ok(tr[0] > 200 && tr[1] > 200 && tr[2] < 80, 'логотип в правом верхнем углу: ' + tr);
+  assert.ok(!(bl[0] > 200 && bl[1] > 200 && bl[2] < 80), 'в левом нижнем логотипа нет');
+  r = await run({ aspect: '16:9', fit: 'fit', clips: [{ ...base, overlay: { file: P('green.mp4'), scale: 40, posX: 0.5, posY: 0.5, chroma: { enabled: true, color: '#00ff00', similarity: 0.2, blend: 0.1 } } }] }, 'r7b.mp4');
+  const mid = frameColors(r.out, 960, 540);
+  assert.ok(mid[0] > 150 && mid[1] < 100, 'красный объект накладки в центре, зелёное убрано: ' + mid);
+  const url3 = await previewFrame({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe, index: 0, at: 0.5,
+    rawProject: { aspect: '9:16', clips: [{ ...base, overlay: { file: P('logo.png'), scale: 30 } }] },
+  });
+  assert.ok(url3.length > 1000, 'кадр предпросмотра с накладкой');
+
+  // 7c. Настройки рендера: разрешение, частота кадров, качество, кодек
+  r = await run({ aspect: '9:16', fit: 'fill', render: { resolution: '720', fps: 60, quality: 'draft' }, clips: [{ ...base }] }, 'r8.mp4');
+  i = await info(r.out);
+  assert.strictEqual(`${i.width}x${i.height}`, '720x1280', 'разрешение 720 по короткой стороне');
+  const fpsOut = spawnSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', r.out], { encoding: 'utf8' }).stdout.trim();
+  assert.strictEqual(fpsOut, '60/1', 'частота кадров 60');
+  const sizeDraft = fs.statSync(r.out).size;
+  r = await run({ aspect: '9:16', fit: 'fill', render: { resolution: '720', fps: 60, quality: 'high' }, clips: [{ ...base }] }, 'r8b.mp4');
+  assert.ok(fs.statSync(r.out).size > sizeDraft, 'высокое качество весит больше черновика');
+  if (caps.h265) {
+    r = await run({ aspect: '16:9', render: { codec: 'h265', quality: 'fast' }, clips: [{ ...base }] }, 'r8c.mp4');
+    const codec = spawnSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', r.out], { encoding: 'utf8' }).stdout.trim();
+    assert.strictEqual(codec, 'hevc');
+  }
+  // Неверные значения не ломают сборку, а заменяются обычными
+  r = await run({ aspect: '16:9', render: { resolution: '99999', fps: 7, quality: 'x', hw: true }, clips: [{ ...base }] }, 'r8d.mp4');
+  assert.strictEqual(`${(await info(r.out)).width}`, '1920');
+
   // 8. Ошибки понятны
   await assert.rejects(run({ clips: [] }, 'e1.mp4'), /хотя бы один клип/);
   await assert.rejects(run({ clips: [{ file: P('a.mp4'), in: 3, out: 2 }] }, 'e2.mp4'), /конец должен быть позже/);

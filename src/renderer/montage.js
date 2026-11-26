@@ -21,6 +21,11 @@
     caption: $('m-caption'), captionSliders: $('m-caption-sliders'), loud: $('m-loud'),
     exportBtn: $('m-export'), progress: $('m-progress'), pct: $('m-pct'), fill: $('m-fill'),
     status: $('m-status'), show: $('m-show'),
+    ovName: $('m-ov-name'), ovPick: $('m-ov-pick'), ovClear: $('m-ov-clear'), ovBox: $('m-ov-box'),
+    ovSliders: $('m-ov-sliders'), ovChroma: $('m-ov-chroma'), ovChromaBox: $('m-ov-chroma-box'),
+    ovKey: $('m-ov-key'), ovDespill: $('m-ov-despill'), ovChromaSliders: $('m-ov-chroma-sliders'),
+    preset: $('m-preset'), res: $('m-res'), h265: $('m-h265'), h265Wrap: $('m-h265-wrap'),
+    hw: $('m-hw'), hwWrap: $('m-hw-wrap'), hwHint: $('m-hw-hint'),
   };
 
   const m = {
@@ -32,6 +37,7 @@
     caption: { text: '', position: 'bottom', size: 64 },
     music: null,
     loudnorm: false,
+    render: { preset: 'custom', resolution: 'source', fps: 30, quality: 'fast', codec: 'h264', hw: true },
     caps: null,
     nextId: 1,
     busy: false,
@@ -78,6 +84,13 @@
     el.caption.disabled = !c.drawtext;
     if (!c.drawtext) el.caption.placeholder = 'Подписи недоступны: на компьютере не нашёлся шрифт';
     el.loud.disabled = !c.loudnorm;
+    el.h265Wrap.hidden = !c.h265;
+    el.hwWrap.hidden = !c.hwEncoder;
+    if (c.hwEncoder) {
+      const names = { h264_nvenc: 'NVIDIA', h264_videotoolbox: 'Apple', h264_qsv: 'Intel', h264_amf: 'AMD' };
+      el.hwHint.textContent = `Найдена видеокарта (${names[c.hwEncoder] || c.hwEncoder}). Заметно быстрее. Если она не справится, ролик соберётся обычным способом`;
+    }
+    render();
   }
 
   // ---- Ползунки ----
@@ -124,6 +137,14 @@
 
     slider(el.chromaSliders, { label: 'Сколько цвета убрать', min: 0.02, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2), get: () => c() && c().chroma.similarity, set: (v) => (c().chroma.similarity = v) });
     slider(el.chromaSliders, { label: 'Мягкость краёв', min: 0, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2), get: () => c() && c().chroma.blend, set: (v) => (c().chroma.blend = v) });
+
+    const ov = () => c() && c().overlay;
+    slider(el.ovSliders, { label: 'Размер (доля ширины кадра)', min: 5, max: 100, step: 1, fmt: (v) => v + '%', get: () => ov() ? ov().scale : 30, set: (v) => (ov().scale = v) });
+    slider(el.ovSliders, { label: 'Положение по горизонтали', min: 0, max: 1, step: 0.01, fmt: (v) => (v < 0.34 ? 'слева' : v > 0.66 ? 'справа' : 'по центру'), get: () => ov() ? ov().posX : 0.85, set: (v) => (ov().posX = v) });
+    slider(el.ovSliders, { label: 'Положение по вертикали', min: 0, max: 1, step: 0.01, fmt: (v) => (v < 0.34 ? 'сверху' : v > 0.66 ? 'снизу' : 'по центру'), get: () => ov() ? ov().posY : 0.15, set: (v) => (ov().posY = v) });
+    slider(el.ovSliders, { label: 'Прозрачность', min: 0.1, max: 1, step: 0.05, fmt: (v) => Math.round((1 - v) * 100) + '%', get: () => ov() ? ov().opacity : 1, set: (v) => (ov().opacity = v) });
+    slider(el.ovChromaSliders, { label: 'Сколько цвета убрать', min: 0.02, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2), get: () => ov() ? ov().chroma.similarity : 0.15, set: (v) => (ov().chroma.similarity = v) });
+    slider(el.ovChromaSliders, { label: 'Мягкость краёв', min: 0, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2), get: () => ov() ? ov().chroma.blend : 0.1, set: (v) => (ov().chroma.blend = v) });
 
     slider(el.projectSliders, { label: 'Наплыв между клипами', min: 0, max: 1.5, step: 0.1, fmt: secs, get: () => m.transition, set: (v) => (m.transition = v) });
     slider(el.musicSliders, { label: 'Громкость музыки', min: 0, max: 2, step: 0.05, fmt: pct, get: () => m.music && m.music.volume, set: (v) => (m.music.volume = v) });
@@ -233,6 +254,26 @@
       el.bgFileWrap.hidden = bgType !== 'file';
       el.bgName.textContent = c.chroma.bg.file ? baseName(c.chroma.bg.file) : 'Не выбран';
     }
+    if (c) {
+      const o = c.overlay;
+      el.ovName.textContent = o ? baseName(o.file) : 'Не выбрано';
+      el.ovClear.hidden = !o;
+      el.ovBox.hidden = !o;
+      if (o) {
+        el.ovChroma.checked = o.chroma.enabled;
+        el.ovChromaBox.hidden = !o.chroma.enabled;
+        el.ovKey.value = o.chroma.color;
+        el.ovDespill.checked = o.chroma.despill;
+      }
+    }
+    el.preset.value = m.render.preset;
+    el.res.value = m.render.resolution;
+    document.querySelector(`input[name="m-fps"][value="${m.render.fps}"]`).checked = true;
+    document.querySelector(`input[name="m-quality"][value="${m.render.quality}"]`).checked = true;
+    el.h265.checked = m.render.codec === 'h265';
+    el.hw.checked = m.render.hw;
+    document.querySelector(`input[name="m-aspect"][value="${m.aspect}"]`).checked = true;
+    document.querySelector(`input[name="m-fit"][value="${m.fit}"]`).checked = true;
     el.fitField.hidden = false;
     el.musicName.textContent = m.music ? m.music.name : 'Не выбрана';
     el.musicClear.hidden = !m.music;
@@ -272,11 +313,13 @@
       fit: m.fit,
       transition: m.transition,
       loudnorm: m.loudnorm,
+      render: m.render,
       caption: m.caption.text.trim() ? m.caption : null,
       music: m.music ? { file: m.music.file, volume: m.music.volume, duck: m.music.duck } : null,
       clips: m.clips.map((c) => ({
         file: c.file, in: c.in, out: c.out, volume: c.volume, speed: c.speed, fadeIn: c.fadeIn, fadeOut: c.fadeOut,
         posX: c.posX, posY: c.posY,
+        overlay: c.overlay ? { file: c.overlay.file, scale: c.overlay.scale, posX: c.overlay.posX, posY: c.overlay.posY, opacity: c.overlay.opacity, chroma: c.overlay.chroma } : null,
         chroma: c.chroma.enabled ? { enabled: true, color: c.chroma.color, similarity: c.chroma.similarity, blend: c.chroma.blend, despill: c.chroma.despill, bg: c.chroma.bg } : null,
       })),
     };
@@ -346,7 +389,46 @@
     if (res.ok && res.data) { cur().chroma.bg.file = res.data; render(); changed(); }
   });
 
-  document.querySelectorAll('input[name="m-aspect"]').forEach((r) => r.addEventListener('change', () => { m.aspect = r.value; render(); changed(); }));
+  el.ovPick.addEventListener('click', async () => {
+    const res = await api.pickMedia('background', false);
+    if (!res.ok || !res.data) return;
+    cur().overlay = {
+      file: res.data, scale: 30, posX: 0.85, posY: 0.15, opacity: 1,
+      chroma: { enabled: false, color: '#00ff00', similarity: 0.15, blend: 0.1, despill: true },
+    };
+    render(); changed();
+  });
+  el.ovClear.addEventListener('click', () => { cur().overlay = null; render(); changed(); });
+  el.ovChroma.addEventListener('change', () => { cur().overlay.chroma.enabled = el.ovChroma.checked; render(); changed(); });
+  el.ovKey.addEventListener('input', () => { cur().overlay.chroma.color = el.ovKey.value; changed(); });
+  el.ovDespill.addEventListener('change', () => { cur().overlay.chroma.despill = el.ovDespill.checked; changed(); });
+
+  // Готовые наборы настроек рендера для разных площадок.
+  const PRESETS = {
+    youtube: { aspect: '16:9', fit: 'fit', resolution: '1080', fps: 30, quality: 'balanced' },
+    shorts: { aspect: '9:16', fit: 'fill', resolution: '1080', fps: 30, quality: 'balanced' },
+    insta: { aspect: '4:5', fit: 'fill', resolution: '1080', fps: 30, quality: 'balanced' },
+    square: { aspect: '1:1', fit: 'fill', resolution: '1080', fps: 30, quality: 'balanced' },
+    messenger: { resolution: '720', fps: 30, quality: 'fast' },
+    draft: { resolution: '480', fps: 30, quality: 'draft' },
+  };
+  el.preset.addEventListener('change', () => {
+    const p = PRESETS[el.preset.value];
+    m.render.preset = el.preset.value;
+    if (p) {
+      if (p.aspect) { m.aspect = p.aspect; m.fit = p.fit; }
+      Object.assign(m.render, { resolution: p.resolution, fps: p.fps, quality: p.quality });
+    }
+    render(); changed();
+  });
+  const custom = () => { m.render.preset = 'custom'; };
+  el.res.addEventListener('change', () => { m.render.resolution = el.res.value; custom(); render(); changed(); });
+  document.querySelectorAll('input[name="m-fps"]').forEach((r) => r.addEventListener('change', () => { m.render.fps = Number(r.value); custom(); render(); }));
+  document.querySelectorAll('input[name="m-quality"]').forEach((r) => r.addEventListener('change', () => { m.render.quality = r.value; custom(); render(); }));
+  el.h265.addEventListener('change', () => { m.render.codec = el.h265.checked ? 'h265' : 'h264'; });
+  el.hw.addEventListener('change', () => { m.render.hw = el.hw.checked; });
+
+  document.querySelectorAll('input[name="m-aspect"]').forEach((r) => r.addEventListener('change', () => { m.aspect = r.value; m.render.preset = 'custom'; render(); changed(); }));
   document.querySelectorAll('input[name="m-fit"]').forEach((r) => r.addEventListener('change', () => { m.fit = r.value; render(); changed(); }));
   document.querySelectorAll('input[name="m-cappos"]').forEach((r) => r.addEventListener('change', () => { m.caption.position = r.value; render(); }));
   el.caption.addEventListener('input', () => { m.caption.text = el.caption.value; });
@@ -408,7 +490,7 @@
     if (res.ok) {
       m.lastFile = res.data.file;
       el.show.hidden = false;
-      setStatus(`Готово: ${res.data.width}×${res.data.height}, ${res.data.duration.toFixed(1)} с`, 'ok');
+      setStatus(`Готово: ${res.data.width}×${res.data.height}, ${res.data.duration.toFixed(1)} с${res.data.encoder && res.data.encoder !== 'x264' ? ', собрано на видеокарте' : ''}`, 'ok');
     } else {
       setStatus(res.cancelled ? 'Отменено' : res.error, res.cancelled ? '' : 'error');
     }

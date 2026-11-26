@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const MAX_TRACKS = 4;
-const FPS = 30;
+const FPS = 30; // значение по умолчанию; в проекте можно выбрать 24, 30 или 60
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
 
 const CANVAS = {
@@ -28,11 +28,39 @@ function hexColor(value, def) {
 }
 
 /** Какие фильтры есть в ffmpeg: от них зависят функции монтажа. */
-async function probeCapabilities({ job, ffmpegPath }) {
+const capsCache = new Map();
+function probeCapabilities({ job, ffmpegPath }) {
+  if (!capsCache.has(ffmpegPath)) {
+    const p = probeCapabilitiesNow({ job, ffmpegPath }).catch((e) => { capsCache.delete(ffmpegPath); throw e; });
+    capsCache.set(ffmpegPath, p);
+  }
+  return capsCache.get(ffmpegPath);
+}
+
+// Видеокарта: пробуем закодировать один кадр, потому что кодек в списке ещё не значит, что он работает.
+const HW_ENCODERS = ['h264_nvenc', 'h264_videotoolbox', 'h264_qsv', 'h264_amf'];
+async function probeHardware({ job, ffmpegPath, encoders }) {
+  for (const name of HW_ENCODERS) {
+    if (!new RegExp(`\\s${name}\\s`).test(encoders)) continue;
+    const { code } = await job.run(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=256x256:r=30:d=0.2',
+      '-c:v', name, '-f', 'null', '-',
+    ]);
+    if (code === 0) return name;
+  }
+  return null;
+}
+
+async function probeCapabilitiesNow({ job, ffmpegPath }) {
   let out = '';
   await job.run(ffmpegPath, ['-hide_banner', '-filters'], { onStdout: (d) => (out += d.toString()) });
+  let enc = '';
+  await job.run(ffmpegPath, ['-hide_banner', '-encoders'], { onStdout: (d) => (enc += d.toString()) });
   const has = (name) => new RegExp(`\\s${name}\\s`).test(out);
+  const hw = await probeHardware({ job, ffmpegPath, encoders: enc });
   return {
+    hwEncoder: hw,
+    h265: /\slibx265\s/.test(enc),
     chromakey: has('chromakey'),
     despill: has('despill'),
     xfade: has('xfade'),
@@ -87,6 +115,14 @@ async function probeFile({ job, ffprobePath, file }) {
 }
 
 function canvasFor(project, infos) {
+  const [bw, bh] = baseCanvas(project, infos);
+  const target = project.render && project.render.resolution !== 'source' ? Number(project.render.resolution) : 0;
+  if (!target) return [bw, bh];
+  const k = target / Math.min(bw, bh);
+  return [even(bw * k), even(bh * k)];
+}
+
+function baseCanvas(project, infos) {
   if (CANVAS[project.aspect]) return CANVAS[project.aspect];
   const first = infos.find((i) => i.width > 0) || { width: 1920, height: 1080 };
   let w = first.width;
@@ -110,6 +146,13 @@ function normalizeProject(raw) {
     loudnorm: Boolean(raw.loudnorm),
     caption: null,
     music: null,
+    render: {
+      resolution: ['source', '480', '720', '1080', '1440', '2160'].includes(String(raw.render && raw.render.resolution)) ? String(raw.render.resolution) : 'source',
+      fps: [24, 30, 60].includes(Number(raw.render && raw.render.fps)) ? Number(raw.render.fps) : 30,
+      quality: ['draft', 'fast', 'balanced', 'high'].includes(raw.render && raw.render.quality) ? raw.render.quality : 'fast',
+      codec: raw.render && raw.render.codec === 'h265' ? 'h265' : 'h264',
+      hw: !raw.render || raw.render.hw !== false,
+    },
     clips: [],
   };
 
@@ -135,7 +178,22 @@ function normalizeProject(raw) {
     if (!(outP > inP + 0.1)) throw new Error(`Клип ${i + 1}: конец должен быть позже начала`);
     const ch = c.chroma && c.chroma.enabled ? c.chroma : null;
     const bg = ch && ch.bg && ch.bg.type === 'file' && typeof ch.bg.file === 'string' && ch.bg.file ? ch.bg : null;
+    const ovRaw = c.overlay && typeof c.overlay.file === 'string' && c.overlay.file ? c.overlay : null;
+    const ovCh = ovRaw && ovRaw.chroma && ovRaw.chroma.enabled ? ovRaw.chroma : null;
     project.clips.push({
+      overlay: ovRaw && {
+        file: ovRaw.file,
+        scale: num(ovRaw.scale, 5, 100, 30),
+        posX: num(ovRaw.posX, 0, 1, 0.85),
+        posY: num(ovRaw.posY, 0, 1, 0.15),
+        opacity: num(ovRaw.opacity, 0.1, 1, 1),
+        chroma: ovCh && {
+          color: hexColor(ovCh.color, '0x00ff00'),
+          similarity: num(ovCh.similarity, 0.01, 0.6, 0.15),
+          blend: num(ovCh.blend, 0, 0.5, 0.1),
+          despill: ovCh.despill !== false,
+        },
+      },
       file: c.file,
       in: inP,
       out: outP,
@@ -162,10 +220,10 @@ function normalizeProject(raw) {
  * inputLabel: метка исходного видео, bgLabel: метка фона для хромакея (или null).
  * Возвращает строки фильтров и метку результата.
  */
-function videoChain({ n, inputLabel, bgInput, clip, W, H, dur, fit }) {
+function videoChain({ n, inputLabel, bgInput, ovInput, clip, W, H, dur, fit, fps = FPS }) {
   const out = `v${n}`;
   const parts = [];
-  let chain = `[${inputLabel}]setpts=(PTS-STARTPTS)/${f3(clip.speed)},fps=${FPS}`;
+  let chain = `[${inputLabel}]setpts=(PTS-STARTPTS)/${f3(clip.speed)},fps=${fps}`;
 
   if (clip.chroma) {
     const c = clip.chroma;
@@ -177,7 +235,7 @@ function videoChain({ n, inputLabel, bgInput, clip, W, H, dur, fit }) {
       : `,scale=${W}:${H}:force_original_aspect_ratio=decrease`;
     chain += `,format=yuva420p[k${n}]`;
     parts.push(chain);
-    parts.push(`[${bgInput}]fps=${FPS},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuv420p[b${n}]`);
+    parts.push(`[${bgInput}]fps=${fps},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuv420p[b${n}]`);
     parts.push(`[b${n}][k${n}]overlay=(W-w)/2:(H-h)/2:shortest=1:format=auto,setsar=1`);
   } else if (fit === 'fit') {
     parts.push(`${chain},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1`);
@@ -190,6 +248,21 @@ function videoChain({ n, inputLabel, bgInput, clip, W, H, dur, fit }) {
     parts.push(`${chain},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}:(iw-ow)*${f3(clip.posX)}:(ih-oh)*${f3(clip.posY)},setsar=1`);
   }
 
+  // Накладка (второе видео или фото) кладётся поверх готового кадра.
+  const ov = clip.overlay;
+  if (ov && ovInput) {
+    parts[parts.length - 1] += `[base${n}]`;
+    let o = `[${ovInput}]setpts=PTS-STARTPTS,fps=${fps},format=rgba`;
+    if (ov.chroma) {
+      o += `,chromakey=color=${ov.chroma.color}:similarity=${f3(ov.chroma.similarity)}:blend=${f3(ov.chroma.blend)}`;
+      if (ov.chroma.despill) o += ',despill=type=green';
+    }
+    o += `,scale=${even((W * ov.scale) / 100)}:-2,format=yuva420p`;
+    if (ov.opacity < 1) o += `,colorchannelmixer=aa=${f3(ov.opacity)}`;
+    parts.push(`${o}[ov${n}]`);
+    parts.push(`[base${n}][ov${n}]overlay=(W-w)*${f3(ov.posX)}:(H-h)*${f3(ov.posY)}:shortest=1:format=auto,setsar=1`);
+  }
+
   // Последняя строка в parts остаётся без метки: дописываем затухания и метку результата.
   let tail = ',format=yuv420p';
   if (clip.fadeIn > 0) tail += `,fade=t=in:st=0:d=${f3(Math.min(clip.fadeIn, dur))}`;
@@ -199,6 +272,12 @@ function videoChain({ n, inputLabel, bgInput, clip, W, H, dur, fit }) {
   }
   parts[parts.length - 1] += `${tail}[${out}]`;
   return { parts, label: out };
+}
+
+/** Входные параметры накладки: фото крутится, видео зацикливается. */
+function overlayInputArgs(file, dur) {
+  const isImg = IMAGE_EXT.has(path.extname(file).toLowerCase());
+  return [...(isImg ? ['-loop', '1'] : ['-stream_loop', '-1']), '-t', f3(dur), '-i', file];
 }
 
 function atempoChain(speed) {
@@ -234,8 +313,9 @@ function audioChain({ n, i, tracks, clip, dur }) {
  * infos: результат probeFile по каждому клипу (в том же порядке).
  * musicInfo: probeFile музыки или null. tmpDir: куда класть текст подписи.
  */
-function buildExport({ project, infos, musicInfo, caps, tmpDir, outFile }) {
+function buildExport({ project, infos, musicInfo, caps, tmpDir, outFile, useHw = false }) {
   const [W, H] = canvasFor(project, infos);
+  const fps = project.render.fps;
   const args = ['-hide_banner', '-loglevel', 'error', '-y'];
   const graph = [];
   const vLabels = [];
@@ -261,12 +341,20 @@ function buildExport({ project, infos, musicInfo, caps, tmpDir, outFile }) {
         const isImg = IMAGE_EXT.has(path.extname(clip.chroma.bg.file).toLowerCase());
         args.push(...(isImg ? ['-loop', '1'] : ['-stream_loop', '-1']), '-t', f3(dur), '-i', clip.chroma.bg.file);
       } else {
-        args.push('-f', 'lavfi', '-i', `color=c=${clip.chroma.bg.color}:s=${W}x${H}:r=${FPS}:d=${f3(dur)}`);
+        args.push('-f', 'lavfi', '-i', `color=c=${clip.chroma.bg.color}:s=${W}x${H}:r=${fps}:d=${f3(dur)}`);
       }
       bgInput = `${j}:v`;
     }
 
-    const v = videoChain({ n, inputLabel: `${i}:v:0`, bgInput, clip, W, H, dur, fit: project.fit });
+    let ovInput = null;
+    if (clip.overlay) {
+      if (clip.overlay.chroma && !caps.chromakey) throw new Error('Эта сборка ffmpeg не умеет хромакей');
+      const k = inputCount++;
+      args.push(...overlayInputArgs(clip.overlay.file, dur));
+      ovInput = `${k}:v`;
+    }
+
+    const v = videoChain({ n, inputLabel: `${i}:v:0`, bgInput, ovInput, clip, W, H, dur, fit: project.fit, fps });
     graph.push(...v.parts);
     vLabels.push(v.label);
 
@@ -349,12 +437,40 @@ function buildExport({ project, infos, musicInfo, caps, tmpDir, outFile }) {
     '-filter_complex', graph.join(';'),
     '-map', `[${vOut}]`, '-map', `[${aOut}]`,
     '-t', f3(total),
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS),
-    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+    ...encoderArgs(project.render, caps, useHw), '-r', String(fps),
     '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats',
     outFile
   );
   return { args, total, width: W, height: H };
+}
+
+const QUALITY = {
+  draft: { preset: 'ultrafast', crf: 30, audio: '128k', hwq: 32 },
+  fast: { preset: 'veryfast', crf: 24, audio: '160k', hwq: 26 },
+  balanced: { preset: 'veryfast', crf: 20, audio: '192k', hwq: 22 },
+  high: { preset: 'medium', crf: 17, audio: '256k', hwq: 18 },
+};
+
+/** Параметры кодирования видео и звука. useHw: пробуем видеокарту (только для H.264). */
+function encoderArgs(render, caps, useHw) {
+  const q = QUALITY[render.quality];
+  const audio = ['-c:a', 'aac', '-b:a', q.audio, '-ar', '48000'];
+  if (render.codec === 'h265' && caps.h265) {
+    return [
+      '-c:v', 'libx265', '-preset', q.preset === 'medium' ? 'medium' : 'veryfast', '-crf', String(q.crf + 4),
+      '-tag:v', 'hvc1', '-pix_fmt', 'yuv420p', ...audio,
+    ];
+  }
+  if (useHw && caps.hwEncoder) {
+    const hw = {
+      h264_nvenc: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', String(q.hwq), '-b:v', '0'],
+      h264_videotoolbox: ['-c:v', 'h264_videotoolbox', '-q:v', String(Math.max(30, 100 - q.hwq * 2)), '-allow_sw', '1'],
+      h264_qsv: ['-c:v', 'h264_qsv', '-global_quality', String(q.hwq), '-preset', 'veryfast'],
+      h264_amf: ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', String(q.hwq), '-qp_p', String(q.hwq + 2)],
+    }[caps.hwEncoder];
+    return [...hw, '-pix_fmt', 'yuv420p', ...audio];
+  }
+  return ['-c:v', 'libx264', '-preset', q.preset, '-crf', String(q.crf), '-pix_fmt', 'yuv420p', '-threads', '0', ...audio];
 }
 
 async function probeAll({ job, ffprobePath, project }) {
@@ -372,6 +488,11 @@ async function probeAll({ job, ffprobePath, project }) {
     if (musicInfo.audioStreams === 0) throw new Error('В файле музыки нет звука');
   }
   for (const clip of project.clips) {
+    if (clip.overlay) {
+      if (!fs.existsSync(clip.overlay.file)) throw new Error('Файл накладки не найден: ' + path.basename(clip.overlay.file));
+      const oi = await probeFile({ job, ffprobePath, file: clip.overlay.file });
+      if (!oi.hasVideo) throw new Error('В файле накладки нет картинки: ' + path.basename(clip.overlay.file));
+    }
     if (clip.chroma && clip.chroma.bg.type === 'file' && !fs.existsSync(clip.chroma.bg.file)) {
       throw new Error('Файл фона не найден');
     }
@@ -387,25 +508,34 @@ async function exportProject({ job, ffmpegPath, ffprobePath, rawProject, outFile
   const { infos, musicInfo } = await probeAll({ job, ffprobePath, project });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipper-'));
   try {
-    const built = buildExport({ project, infos, musicInfo, caps, tmpDir, outFile });
-    let buf = '';
-    const { code, stderr } = await job.run(ffmpegPath, built.args, {
-      onStdout: (d) => {
-        buf += d.toString();
-        const lines = buf.split('\n');
-        buf = lines.pop();
-        for (const line of lines) {
-          const m = /^out_time_us=(\d+)/.exec(line);
-          if (m && onProgress) onProgress(Math.min(1, Number(m[1]) / 1e6 / built.total));
-        }
-      },
-    });
+    const attempt = async (useHw) => {
+      const built = buildExport({ project, infos, musicInfo, caps, tmpDir, outFile, useHw });
+      let buf = '';
+      const res = await job.run(ffmpegPath, built.args, {
+        onStdout: (d) => {
+          buf += d.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            const m = /^out_time_us=(\d+)/.exec(line);
+            if (m && onProgress) onProgress(Math.min(1, Number(m[1]) / 1e6 / built.total));
+          }
+        },
+      });
+      return { ...res, built };
+    };
+    const wantHw = project.render.hw && Boolean(caps.hwEncoder) && project.render.codec === 'h264';
+    let { code, stderr, built } = await attempt(wantHw);
+    if (code !== 0 && wantHw && !job.cancelled) {
+      // Видеокарта не справилась (бывает с большими кадрами): собираем обычным способом.
+      ({ code, stderr, built } = await attempt(false));
+    }
     if (code !== 0) {
       fs.rmSync(outFile, { force: true });
       throw new Error('Не удалось собрать видео: ' + (stderr.trim().split('\n').slice(-3).join(' | ') || 'код ' + code));
     }
     if (onProgress) onProgress(1);
-    return { file: outFile, duration: built.total, width: built.width, height: built.height };
+    return { file: outFile, duration: built.total, width: built.width, height: built.height, encoder: wantHw && code === 0 ? caps.hwEncoder : 'x264' };
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -436,12 +566,18 @@ async function previewFrame({ job, ffmpegPath, ffprobePath, rawProject, index, a
         const isImg = IMAGE_EXT.has(path.extname(clip.chroma.bg.file).toLowerCase());
         args.push(...(isImg ? ['-loop', '1'] : []), '-t', '2', '-i', clip.chroma.bg.file);
       } else {
-        args.push('-f', 'lavfi', '-i', `color=c=${clip.chroma.bg.color}:s=${W}x${H}:r=${FPS}:d=2`);
+        args.push('-f', 'lavfi', '-i', `color=c=${clip.chroma.bg.color}:s=${W}x${H}:r=${project.render.fps}:d=2`);
       }
       bgInput = '1:v';
     }
+    let ovInput = null;
+    if (clip.overlay) {
+      if (clip.overlay.chroma && !caps.chromakey) throw new Error('Эта сборка ffmpeg не умеет хромакей');
+      args.push(...overlayInputArgs(clip.overlay.file, 2));
+      ovInput = `${bgInput ? 2 : 1}:v`;
+    }
     // В превью скорость не нужна: берём точный кадр.
-    const v = videoChain({ n: 0, inputLabel: '0:v:0', bgInput, clip: { ...clip, speed: 1, fadeIn: 0, fadeOut: 0 }, W, H, dur: 10, fit: project.fit });
+    const v = videoChain({ n: 0, inputLabel: '0:v:0', bgInput, ovInput, clip: { ...clip, speed: 1, fadeIn: 0, fadeOut: 0 }, W, H, dur: 10, fit: project.fit, fps: project.render.fps });
     const graph = [...v.parts, `[${v.label}]scale=720:-2[out]`].join(';');
     args.push('-filter_complex', graph, '-map', '[out]', '-frames:v', '1', png);
     const { code, stderr } = await job.run(ffmpegPath, args);
@@ -454,4 +590,4 @@ async function previewFrame({ job, ffmpegPath, ffprobePath, rawProject, index, a
   }
 }
 
-module.exports = { exportProject, previewFrame, probeCapabilities, probeFile, normalizeProject, buildExport, canvasFor, CANVAS };
+module.exports = { encoderArgs, exportProject, previewFrame, probeCapabilities, probeFile, normalizeProject, buildExport, canvasFor, CANVAS };

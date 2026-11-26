@@ -161,6 +161,20 @@
           </div>
         </fieldset>
 
+        <fieldset class="field">
+          <legend>Наложение (картинка или видео поверх)</legend>
+          <div class="folder"><span id="m-ov-name" class="folder-path">Не выбрано</span><button id="m-ov-pick" class="btn ghost" type="button">Выбрать</button><button id="m-ov-clear" class="btn ghost" type="button" hidden>Убрать</button></div>
+          <div id="m-ov-box" class="chroma" hidden>
+            <div id="m-ov-sliders" class="sliders"></div>
+            <label class="check"><input id="m-ov-chroma" type="checkbox"><span><span class="check-title">Убрать однотонный фон у наложения</span><span class="hint">Хромакей: зелёный экран исчезнет, останется только объект</span></span></label>
+            <div id="m-ov-chroma-box" class="chroma" hidden>
+              <label class="inline">Цвет фона <input id="m-ov-key" type="color" value="#00ff00"></label>
+              <div id="m-ov-chroma-sliders" class="sliders"></div>
+              <label class="check"><input id="m-ov-despill" type="checkbox" checked><span>Убрать зелёный отсвет на краях</span></label>
+            </div>
+          </div>
+        </fieldset>
+
         <div class="frame-box">
           <button id="m-frame-btn" class="btn secondary" type="button">Показать кадр как в ролике</button>
           <img id="m-frame" class="m-frame" alt="Кадр как в готовом ролике" hidden>
@@ -209,6 +223,50 @@
             <label><input type="radio" name="m-cappos" value="bottom" checked><span>Снизу</span></label>
           </div>
           <div id="m-caption-sliders" class="sliders"></div>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend>Рендер</legend>
+          <div class="render-grid">
+            <label class="sel-field"><span class="field-label">Для чего</span>
+              <select id="m-preset">
+                <option value="custom">Свои настройки</option>
+                <option value="youtube">YouTube, 16:9, 1080p</option>
+                <option value="shorts">Shorts, TikTok, Reels, 9:16</option>
+                <option value="insta">Instagram, пост 4:5</option>
+                <option value="square">Квадрат 1:1</option>
+                <option value="messenger">Мессенджер, лёгкий файл</option>
+                <option value="draft">Черновик, самый быстрый</option>
+              </select>
+            </label>
+            <label class="sel-field"><span class="field-label">Разрешение (меньшая сторона)</span>
+              <select id="m-res">
+                <option value="source">Как в формате кадра</option>
+                <option value="480">480p</option>
+                <option value="720">720p</option>
+                <option value="1080">1080p</option>
+                <option value="1440">1440p (2K)</option>
+                <option value="2160">2160p (4K)</option>
+              </select>
+            </label>
+          </div>
+          <span class="field-label">Кадров в секунду</span>
+          <div class="seg n3">
+            <span class="thumb" aria-hidden="true"></span>
+            <label><input type="radio" name="m-fps" value="24"><span>24</span></label>
+            <label><input type="radio" name="m-fps" value="30" checked><span>30</span></label>
+            <label><input type="radio" name="m-fps" value="60"><span>60</span></label>
+          </div>
+          <span class="field-label">Качество и скорость</span>
+          <div class="seg n4">
+            <span class="thumb" aria-hidden="true"></span>
+            <label><input type="radio" name="m-quality" value="draft"><span>Черновик</span></label>
+            <label><input type="radio" name="m-quality" value="fast" checked><span>Быстро</span></label>
+            <label><input type="radio" name="m-quality" value="balanced"><span>Баланс</span></label>
+            <label><input type="radio" name="m-quality" value="high"><span>Высокое</span></label>
+          </div>
+          <label id="m-h265-wrap" class="check" hidden><input id="m-h265" type="checkbox"><span><span class="check-title">Кодек H.265</span><span class="hint">Файл примерно вдвое меньше, но собирается дольше, а некоторые старые плееры его не открывают</span></span></label>
+          <label id="m-hw-wrap" class="check" hidden><input id="m-hw" type="checkbox" checked><span><span class="check-title">Рендер на видеокарте</span><span id="m-hw-hint" class="hint">Заметно быстрее. Если видеокарта не справится, ролик соберётся обычным способом</span></span></label>
         </fieldset>
 
         <label class="check"><input id="m-loud" type="checkbox"><span><span class="check-title">Выровнять громкость</span><span class="hint">Как на YouTube и в соцсетях: ролик звучит ровно, без тихих и слишком громких мест</span></span></label>
