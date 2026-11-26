@@ -14,6 +14,18 @@ contextBridge.exposeInMainWorld('clipper', {
   trash: (file) => ipcRenderer.invoke('video:trash', file),
   run: (videos, options) => ipcRenderer.invoke('job:run', { videos, options }),
   cancel: () => ipcRenderer.invoke('job:cancel'),
+  pickMedia: (kind, multi) => ipcRenderer.invoke('dialog:media', { kind, multi }),
+  pickSave: (name) => ipcRenderer.invoke('dialog:save', name),
+  montageCaps: () => ipcRenderer.invoke('montage:caps'),
+  montageInfo: (file) => ipcRenderer.invoke('montage:info', file),
+  montagePreview: (project, index, at) => ipcRenderer.invoke('montage:preview', { project, index, at }),
+  montageExport: (project, outFile) => ipcRenderer.invoke('montage:export', { project, outFile }),
+  montageCancel: () => ipcRenderer.invoke('montage:cancel'),
+  onMontageProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('montage:progress', listener);
+    return () => ipcRenderer.removeListener('montage:progress', listener);
+  },
   show: (target) => ipcRenderer.invoke('shell:show', target),
   pathForFile: (file) => webUtils.getPathForFile(file),
   onProgress: (callback) => {

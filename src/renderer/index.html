@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src file:">
   <meta name="color-scheme" content="dark light">
   <title>Clipper</title>
   <link rel="stylesheet" href="styles.css">
@@ -13,7 +13,14 @@
     <header class="head">
       <h1>Clipper</h1>
       <p>Нарезка стримов на клипы</p>
+      <div class="seg n2 tabs" role="radiogroup" aria-label="Раздел">
+        <span class="thumb" aria-hidden="true"></span>
+        <label><input type="radio" name="tab" value="cut" checked><span>Нарезка</span></label>
+        <label><input type="radio" name="tab" value="montage"><span>Монтаж</span></label>
+      </div>
     </header>
+
+    <div id="view-cut" class="view">
 
     <section class="block" aria-label="Видео">
       <div id="drop" class="drop" role="button" tabindex="0" aria-describedby="drop-hint">
@@ -102,13 +109,122 @@
         <h2 id="results-title"></h2>
         <div class="results-actions">
           <button id="open-folder" class="btn ghost" type="button">Открыть папку</button>
+          <button id="to-montage" class="btn ghost" type="button">В монтаж</button>
           <button id="copy-times" class="btn ghost" type="button">Скопировать таймкоды</button>
         </div>
       </div>
       <ol id="results-list" class="results-list"></ol>
     </section>
+    </div>
+
+    <div id="view-montage" class="view" hidden>
+      <section class="block" aria-label="Клипы монтажа">
+        <div class="results-head">
+          <h2>Клипы</h2>
+          <div class="results-actions">
+            <button id="m-add" class="btn ghost" type="button">Добавить файлы</button>
+            <button id="m-from-cut" class="btn ghost" type="button" disabled>Из последней нарезки</button>
+          </div>
+        </div>
+        <ol id="m-list" class="m-list"></ol>
+        <p id="m-empty" class="hint">Добавь клипы: выбери файлы или перенеси их сюда из вкладки «Нарезка».</p>
+      </section>
+
+      <section id="m-editor" class="block settings" aria-label="Редактор клипа" hidden>
+        <video id="m-video" class="m-video" controls preload="metadata"></video>
+        <div class="trim">
+          <div class="field">
+            <label class="field-label" for="m-in">Начало, с</label>
+            <div class="trim-row"><input id="m-in" type="number" min="0" step="0.1"><button id="m-in-now" class="btn ghost" type="button">Взять с плеера</button></div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="m-out">Конец, с</label>
+            <div class="trim-row"><input id="m-out" type="number" min="0" step="0.1"><button id="m-out-now" class="btn ghost" type="button">Взять с плеера</button></div>
+          </div>
+        </div>
+        <div id="m-sliders" class="sliders"></div>
+
+        <fieldset class="field">
+          <legend>Хромакей (зелёный экран)</legend>
+          <label class="check"><input id="m-chroma" type="checkbox"><span><span class="check-title">Убрать однотонный фон</span><span class="hint">Вырезает цвет и кладёт ролик на другой фон</span></span></label>
+          <div id="m-chroma-box" class="chroma" hidden>
+            <label class="inline">Цвет фона <input id="m-key" type="color" value="#00ff00"></label>
+            <div id="m-chroma-sliders" class="sliders"></div>
+            <label class="check"><input id="m-despill" type="checkbox" checked><span>Убрать зелёный отсвет на краях</span></label>
+            <div class="seg n2">
+              <span class="thumb" aria-hidden="true"></span>
+              <label><input type="radio" name="m-bg" value="color" checked><span>Фон: цвет</span></label>
+              <label><input type="radio" name="m-bg" value="file"><span>Фон: картинка или видео</span></label>
+            </div>
+            <label id="m-bg-color-wrap" class="inline">Цвет нового фона <input id="m-bg-color" type="color" value="#000000"></label>
+            <div id="m-bg-file-wrap" class="folder" hidden><span id="m-bg-name" class="folder-path"></span><button id="m-bg-pick" class="btn ghost" type="button">Выбрать</button></div>
+          </div>
+        </fieldset>
+
+        <div class="frame-box">
+          <button id="m-frame-btn" class="btn secondary" type="button">Показать кадр как в ролике</button>
+          <img id="m-frame" class="m-frame" alt="Кадр как в готовом ролике" hidden>
+        </div>
+      </section>
+
+      <section id="m-project" class="block settings" aria-label="Ролик" hidden>
+        <fieldset class="field">
+          <legend>Формат кадра</legend>
+          <div class="seg n5">
+            <span class="thumb" aria-hidden="true"></span>
+            <label><input type="radio" name="m-aspect" value="original" checked><span>Как есть</span></label>
+            <label><input type="radio" name="m-aspect" value="16:9"><span>16:9</span></label>
+            <label><input type="radio" name="m-aspect" value="9:16"><span>9:16</span></label>
+            <label><input type="radio" name="m-aspect" value="1:1"><span>1:1</span></label>
+            <label><input type="radio" name="m-aspect" value="4:5"><span>4:5</span></label>
+          </div>
+        </fieldset>
+        <fieldset id="m-fit-field" class="field">
+          <legend>Если пропорции не совпали</legend>
+          <div class="seg n3">
+            <span class="thumb" aria-hidden="true"></span>
+            <label><input type="radio" name="m-fit" value="fill" checked><span>Обрезать края</span></label>
+            <label><input type="radio" name="m-fit" value="fit"><span>Чёрные полосы</span></label>
+            <label><input type="radio" name="m-fit" value="blur"><span>Размытый фон</span></label>
+          </div>
+        </fieldset>
+        <div id="m-project-sliders" class="sliders"></div>
+
+        <fieldset class="field">
+          <legend>Музыка</legend>
+          <div class="folder"><span id="m-music-name" class="folder-path">Не выбрана</span><button id="m-music-pick" class="btn ghost" type="button">Выбрать</button><button id="m-music-clear" class="btn ghost" type="button" hidden>Убрать</button></div>
+          <div id="m-music-box" hidden>
+            <div id="m-music-sliders" class="sliders"></div>
+            <label class="check"><input id="m-duck" type="checkbox" checked><span>Приглушать музыку, когда говорит голос</span></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend>Подпись поверх видео</legend>
+          <input id="m-caption" class="text-in" type="text" maxlength="200" placeholder="Текст (можно оставить пустым)">
+          <div class="seg n3">
+            <span class="thumb" aria-hidden="true"></span>
+            <label><input type="radio" name="m-cappos" value="top"><span>Сверху</span></label>
+            <label><input type="radio" name="m-cappos" value="center"><span>По центру</span></label>
+            <label><input type="radio" name="m-cappos" value="bottom" checked><span>Снизу</span></label>
+          </div>
+          <div id="m-caption-sliders" class="sliders"></div>
+        </fieldset>
+
+        <label class="check"><input id="m-loud" type="checkbox"><span><span class="check-title">Выровнять громкость</span><span class="hint">Как на YouTube и в соцсетях: ролик звучит ровно, без тихих и слишком громких мест</span></span></label>
+      </section>
+
+      <button id="m-export" class="btn primary" type="button" disabled>Собрать ролик</button>
+      <div id="m-progress" class="progress" hidden>
+        <div class="progress-top"><span>Собираю ролик</span><span id="m-pct" class="num"></span></div>
+        <div class="bar"><div id="m-fill" class="bar-fill"></div></div>
+      </div>
+      <p id="m-status" class="status" role="status" aria-live="polite"></p>
+      <button id="m-show" class="btn ghost" type="button" hidden>Показать файл в папке</button>
+    </div>
   </main>
 
   <script src="app.js"></script>
+  <script src="montage.js"></script>
 </body>
 </html>

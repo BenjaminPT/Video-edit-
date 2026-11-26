@@ -9,9 +9,13 @@ const { Semaphore } = require('./queue');
 const tools = require('./tools');
 const { runBatch, probeMedia, analyzeVideo } = require('./pipeline');
 const { downloadInto } = require('./downloader');
+const montage = require('./montage');
+const { pathToFileURL } = require('url');
 
 let win = null;
 let runJob = null; // идущая нарезка: одновременно только одна
+let montageJob = null; // идущий экспорт монтажа
+let previewJob = null; // последний запрос кадра: новый отменяет старый
 
 // Загрузки и анализ идут по номеру видео, их можно отменять по одной.
 const tasks = new Map();
@@ -259,6 +263,79 @@ handle('job:cancel', async () => {
   return true;
 });
 
+// ---- Монтаж ----
+
+const MEDIA_FILTERS = {
+  video: [{ name: 'Видео', extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'flv', 'ts', 'm4v', 'wmv'] }],
+  audio: [{ name: 'Музыка', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus'] }],
+  background: [
+    { name: 'Картинка или видео', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'mp4', 'mov', 'webm', 'mkv'] },
+  ],
+};
+
+handle('dialog:media', async ({ kind, multi }) => {
+  const filters = MEDIA_FILTERS[kind] || MEDIA_FILTERS.video;
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Выбери файл',
+    properties: multi ? ['openFile', 'multiSelections'] : ['openFile'],
+    filters: [...filters, { name: 'Все файлы', extensions: ['*'] }],
+  });
+  if (res.canceled) return null;
+  return multi ? res.filePaths : res.filePaths[0];
+});
+
+handle('dialog:save', async (defaultName) => {
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Сохранить ролик',
+    defaultPath: path.join(app.getPath('videos'), typeof defaultName === 'string' && defaultName ? defaultName : 'montage.mp4'),
+    filters: [{ name: 'MP4', extensions: ['mp4'] }],
+  });
+  if (res.canceled || !res.filePath) return null;
+  return /\.mp4$/i.test(res.filePath) ? res.filePath : res.filePath + '.mp4';
+});
+
+handle('montage:caps', async () => montage.probeCapabilities({ job: new Job(), ffmpegPath: tools.ffmpegPath() }));
+
+// Сведения о файле для монтажа плюс адрес, по которому окно проигрывает его само.
+handle('montage:info', async (file) => {
+  requireFile(file);
+  const info = await montage.probeFile({ job: new Job(), ffprobePath: tools.ffprobePath(), file });
+  return { ...info, name: path.basename(file), url: pathToFileURL(file).href };
+});
+
+handle('montage:preview', async ({ project, index, at }) => {
+  if (previewJob) previewJob.cancel();
+  const job = new Job();
+  previewJob = job;
+  try {
+    return await montage.previewFrame({
+      job, ffmpegPath: tools.ffmpegPath(), ffprobePath: tools.ffprobePath(), rawProject: project, index, at,
+    });
+  } finally {
+    if (previewJob === job) previewJob = null;
+  }
+});
+
+handle('montage:export', async ({ project, outFile }) => {
+  if (montageJob) throw new Error('Монтаж уже собирается');
+  requireString(outFile, 'outFile');
+  const job = new Job();
+  montageJob = job;
+  try {
+    return await montage.exportProject({
+      job, ffmpegPath: tools.ffmpegPath(), ffprobePath: tools.ffprobePath(), rawProject: project, outFile,
+      onProgress: (value) => send('montage:progress', { value }),
+    });
+  } finally {
+    if (montageJob === job) montageJob = null;
+  }
+});
+
+handle('montage:cancel', async () => {
+  if (montageJob) montageJob.cancel();
+  return true;
+});
+
 handle('shell:show', async (target) => {
   requireString(target, 'path');
   if (!fs.existsSync(target)) throw new Error('Путь не найден');
@@ -276,6 +353,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (runJob) runJob.cancel();
+  if (montageJob) montageJob.cancel();
+  if (previewJob) previewJob.cancel();
   for (const job of tasks.values()) job.cancel();
   if (process.platform !== 'darwin') app.quit();
 });

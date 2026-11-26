@@ -413,6 +413,7 @@ const AUDIO_WARN = { partial: 'звук пропадает', none: 'нет зв�
 
 function renderResults(data, multi) {
   state.last = data;
+  document.dispatchEvent(new CustomEvent('clipper:cut-done', { detail: data.clips.map((c) => c.file) }));
   if (!data.clips.length) {
     setStatus(data.note || 'Клипов нет');
     return;
@@ -445,6 +446,11 @@ function cell(cls, text) {
   s.textContent = text;
   return s;
 }
+
+$('to-montage').addEventListener('click', () => {
+  if (!state.last) return;
+  document.dispatchEvent(new CustomEvent('clipper:to-montage', { detail: state.last.clips.map((c) => c.file) }));
+});
 
 el.openFolder.addEventListener('click', () => {
   if (state.last && state.last.folder) api.show(state.last.folder);
