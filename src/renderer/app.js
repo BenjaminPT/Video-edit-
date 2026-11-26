@@ -34,7 +34,7 @@ const MODE_HINTS = {
   fixed: 'Режет каждое видео подряд на равные куски',
 };
 const COUNT = {
-  top: { label: 'Сколько лучших клипов', min: 3, max: 30, value: 10 },
+  top: { label: 'Сколько лучших клипов', min: 3, max: 100, value: 10 },
   smart: { label: 'Клипов из каждого видео', min: 3, max: 100, value: 15 },
 };
 
