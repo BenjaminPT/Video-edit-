@@ -123,7 +123,7 @@ async function checkAudio({ job, ffmpegPath, file, length }) {
  * у клипа остаётся отметка audio: 'partial' или 'none'.
  * onProgress(доля, сделано, всего)
  */
-async function cutPlan({ job, ffmpegPath, plan, folder, fast, onProgress }) {
+async function cutPlan({ job, ffmpegPath, plan, folder, fast, onProgress, writeTimecodes = true }) {
   fs.mkdirSync(folder, { recursive: true });
   const clips = [];
 
@@ -149,6 +149,7 @@ async function cutPlan({ job, ffmpegPath, plan, folder, fast, onProgress }) {
     if (onProgress) onProgress((i + 1) / plan.length, i + 1, plan.length);
   }
 
+  if (!writeTimecodes) return { folder, clips };
   const mark = { ok: '', partial: '  [звук пропадает]', none: '  [нет звука]' };
   const lines = clips.map(
     (c) => `${pad(c.index)}  ${clock(c.start)} - ${clock(c.end)}  ${path.basename(c.file)}${mark[c.audio]}`

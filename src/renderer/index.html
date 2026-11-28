@@ -67,6 +67,18 @@
         </div>
       </fieldset>
 
+      <div id="criterion-field" class="field">
+        <label class="field-label" for="criterion">По чему искать лучшее</label>
+        <select id="criterion">
+          <option value="mix">Сбалансированно</option>
+          <option value="peak">Самый громкий всплеск</option>
+          <option value="sustain">Долгая реакция</option>
+          <option value="talk">Оживлённый разговор</option>
+          <option value="surprise">Внезапность</option>
+        </select>
+        <p id="criterion-hint" class="hint"></p>
+      </div>
+
       <div id="count-field" class="field">
         <div class="field-row">
           <label for="count" id="count-label">Сколько клипов</label>
@@ -113,7 +125,16 @@
           <button id="copy-times" class="btn ghost" type="button">Скопировать таймкоды</button>
         </div>
       </div>
+      <video id="r-player" class="m-video" controls preload="metadata" hidden></video>
       <ol id="results-list" class="results-list"></ol>
+
+      <div id="extras" class="extras" hidden>
+        <div class="results-head">
+          <h3 id="extras-title">Другие моменты</h3>
+        </div>
+        <p class="hint">Следующие по рейтингу, которые не попали в топ. Посмотри любой и вырежи, если подходит: он появится в той же папке.</p>
+        <ol id="extras-list" class="results-list"></ol>
+      </div>
     </section>
     </div>
 

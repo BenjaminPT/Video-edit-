@@ -7,13 +7,17 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { Job } = require('./job');
 const { Semaphore } = require('./queue');
 const tools = require('./tools');
-const { runBatch, probeMedia, analyzeVideo } = require('./pipeline');
+const { runBatch, cutExtra, probeMedia, analyzeVideo } = require('./pipeline');
 const { downloadInto } = require('./downloader');
 const montage = require('./montage');
 const { pathToFileURL } = require('url');
 
 let win = null;
 let runJob = null; // идущая нарезка: одновременно только одна
+// Папки готовых нарезок и исходные видео этой сессии: вырезать «другие моменты» можно только в них.
+const resultFolders = new Set();
+const cutSources = new Set();
+let extraJob = null;
 let montageJob = null; // идущий экспорт монтажа
 let previewJob = null; // последний запрос кадра: новый отменяет старый
 
@@ -252,9 +256,37 @@ handle('job:run', async ({ videos, options }) => {
     });
     result.analyses.forEach((info, i) => storeAnalysis(videos[i].file, info));
     const { analyses, ...rest } = result; // сам анализ в интерфейс не отдаём: он большой и ему там нечего делать
+    if (rest.folder) resultFolders.add(rest.folder);
+    videos.forEach((v) => cutSources.add(v.file));
+    // Окну нужны адреса, чтобы проиграть клипы и исходные видео прямо в приложении.
+    rest.clips = rest.clips.map((c) => ({ ...c, url: pathToFileURL(c.file).href }));
+    rest.extras = (rest.extras || []).map((e) => ({ ...e, url: pathToFileURL(e.file).href }));
     return rest;
   } finally {
     if (runJob === job) runJob = null;
+  }
+});
+
+// Вырезает один из «других моментов» в папку готового топа.
+handle('clip:cut-extra', async ({ folder, extra, fast }) => {
+  if (!resultFolders.has(folder)) throw new Error('Сначала сделай нарезку');
+  if (!extra || !cutSources.has(extra.file)) throw new Error('Это видео не из текущей нарезки');
+  requireFile(extra.file);
+  if (extraJob) throw new Error('Предыдущий клип ещё вырезается');
+  const job = new Job();
+  extraJob = job;
+  try {
+    const clip = await cutExtra({
+      job, ffmpegPath: tools.ffmpegPath(), folder,
+      extra: {
+        file: extra.file, start: Number(extra.start), end: Number(extra.end), rank: Number(extra.rank) || 0,
+        tag: String(extra.tag || ''), video: String(extra.video || ''), audioStreams: Number(extra.audioStreams) || 0,
+      },
+      fast: Boolean(fast),
+    });
+    return { ...clip, url: pathToFileURL(clip.file).href };
+  } finally {
+    if (extraJob === job) extraJob = null;
   }
 });
 
@@ -354,6 +386,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (runJob) runJob.cancel();
   if (montageJob) montageJob.cancel();
+  if (extraJob) extraJob.cancel();
   if (previewJob) previewJob.cancel();
   for (const job of tasks.values()) job.cancel();
   if (process.platform !== 'darwin') app.quit();

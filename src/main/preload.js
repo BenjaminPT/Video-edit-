@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('clipper', {
   trash: (file) => ipcRenderer.invoke('video:trash', file),
   run: (videos, options) => ipcRenderer.invoke('job:run', { videos, options }),
   cancel: () => ipcRenderer.invoke('job:cancel'),
+  cutExtra: (folder, extra, fast) => ipcRenderer.invoke('clip:cut-extra', { folder, extra, fast }),
   pickMedia: (kind, multi) => ipcRenderer.invoke('dialog:media', { kind, multi }),
   pickSave: (name) => ipcRenderer.invoke('dialog:save', name),
   montageCaps: () => ipcRenderer.invoke('montage:caps'),

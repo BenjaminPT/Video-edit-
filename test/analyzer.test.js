@@ -15,7 +15,7 @@ const { Job } = require('../src/main/job');
 const { computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments } = require('../src/main/analyzer');
 const { Semaphore } = require('../src/main/queue');
 const { cutClips, checkAudio } = require('../src/main/cutter');
-const { runPipeline, runBatch, probeMedia, analyzeVideo } = require('../src/main/pipeline');
+const { runPipeline, runBatch, cutExtra, probeMedia, analyzeVideo } = require('../src/main/pipeline');
 
 function resolveTool(name) {
   try {
@@ -57,6 +57,10 @@ function makeStream(file) {
     '-map', '0:v', '-map', '[a]',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '10', '-c:a', 'aac', file,
   ], 'тестовый стрим');
+}
+
+function topCriterion(list, t, len) {
+  return list.some((c) => c.peak >= t - 1 && c.peak <= t + len);
 }
 
 function near(actual, expected, tolerance, label) {
@@ -261,6 +265,43 @@ const covers = (seg, t) => seg.start <= t && seg.end >= t;
   ];
   assert.deepStrictEqual(pickTop(crowd, { count: 3 }).map((c) => c.peak), [7, 107, 2007], 'квота на 15 минут не сработала');
   assert.strictEqual(pickTop(crowd, { count: 4 }).length, 4, 'при нехватке строгих клипов квота ослабляется');
+
+  // Критерии отбора: каждый даёт свой рейтинг и свою подсказку; тишина и музыка не проходят ни в одном
+  const byCriterion = {};
+  for (const criterion of ['mix', 'peak', 'sustain', 'talk', 'surprise']) {
+    const list = rankCandidates(profile, { clipLen: 20, duration: media.duration, criterion });
+    byCriterion[criterion] = list;
+    console.log(`критерий ${criterion}: кандидатов ${list.length}, лучший ${list.length ? Math.max(...list.map((c) => c.score)) : '-'}`);
+    assert.ok(list.every((c) => !covers(c, 205.5) && (c.peak < 68 || c.peak > 80)), `критерий ${criterion}: тишина или музыка попали в рейтинг`);
+  }
+  assert.ok(byCriterion.peak.length > 0 && byCriterion.peak.every((c) => c.tag === 'громкий всплеск'));
+  assert.ok(byCriterion.surprise.length > 0, 'скачок после спокойного участка должен находиться');
+  assert.ok(byCriterion.surprise.every((c) => c.tag === 'внезапный всплеск'));
+  REACTIONS.forEach((t) => assert.ok(
+    topCriterion(byCriterion.surprise, t, 6) , `внезапность: реакция на ${t} с не найдена`
+  ));
+
+  // «Другие моменты»: после топа остаются следующие по рейтингу, они не пересекаются с топом и их можно вырезать
+  const withExtras = await runBatch({
+    job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe,
+    videos: [{ id: 'x', input: stream }],
+    options: { outDir: path.join(tmp, 'outExtra'), mode: 'top', clipLen: 20, count: 1, fast: true, criterion: 'peak' },
+    onProgress() {},
+  });
+  assert.strictEqual(withExtras.clips.length, 1);
+  assert.ok(withExtras.extras.length >= 1, 'после топа должны остаться другие моменты');
+  assert.ok(withExtras.extras.every((e) => e.rank > 1 && e.file === stream && e.tag), 'у других моментов есть номер, файл и подсказка');
+  const topClip = withExtras.clips[0];
+  assert.ok(withExtras.extras.every((e) => e.end <= topClip.start || e.start >= topClip.end), 'другие моменты не пересекаются с топом');
+  const extraClip = await cutExtra({ job: new Job(), ffmpegPath: ffmpeg, folder: withExtras.folder, extra: withExtras.extras[0], fast: true });
+  assert.ok(fs.existsSync(extraClip.file) && path.dirname(extraClip.file) === withExtras.folder);
+  assert.ok(path.basename(extraClip.file).startsWith(String(withExtras.extras[0].rank).padStart(2, '0') + '_'));
+  const tcLines = fs.readFileSync(path.join(withExtras.folder, 'timecodes.txt'), 'utf8').trim().split('\n');
+  assert.strictEqual(tcLines.length, 2, 'вырезанный момент дописан в timecodes.txt');
+  await assert.rejects(
+    runBatch({ job: new Job(), ffmpegPath: ffmpeg, ffprobePath: ffprobe, videos: [{ id: 'x', input: stream }], options: { outDir: tmp, mode: 'top', clipLen: 20, count: 3, criterion: 'nope' }, onProgress() {} }),
+    /критерий/
+  );
 
   const batchEvents = [];
   const batch = await runBatch({

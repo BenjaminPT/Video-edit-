@@ -1,12 +1,14 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
-const { computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments } = require('./analyzer');
+const { CRITERIA, computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments } = require('./analyzer');
 const { cutClips, cutPlan, clockForFile, safeName, uniqueDir, pad } = require('./cutter');
 
 const ALLOWED_LENGTHS = [20, 30, 60];
 const MAX_CLIPS = 200;
 const MODES = ['top', 'smart', 'fixed'];
+const RESERVE = 30; // сколько следующих по рейтингу моментов показываем рядом с топом
 
 /** Длительность и число аудиодорожек одним вызовом ffprobe. */
 async function probeMedia({ job, ffprobePath, input }) {
@@ -54,7 +56,9 @@ function validateOptions(opts) {
   if (!Number.isInteger(count) || count < 1 || count > MAX_CLIPS) {
     throw new Error(`Количество клипов: от 1 до ${MAX_CLIPS}`);
   }
-  return { ...opts, count, fast: Boolean(opts.fast) };
+  const criterion = opts.criterion === undefined ? 'mix' : opts.criterion;
+  if (!Object.prototype.hasOwnProperty.call(CRITERIA, criterion)) throw new Error('Неизвестный критерий отбора');
+  return { ...opts, count, criterion, fast: Boolean(opts.fast) };
 }
 
 const plural = (n, one, few, many) => {
@@ -124,17 +128,23 @@ async function runBatch({ job, ffmpegPath, ffprobePath, videos, options, onProgr
 
   const onCut = (value, done, total) => onProgress({ stage: 'cut', value, label: `Режу клипы ${done} из ${total}` });
   let clips = [];
+  let extrasOut = [];
   let folder = opts.outDir;
 
   if (opts.mode === 'top') {
     const entries = [];
     infos.forEach((info, v) => {
       if (!info.profile) return;
-      for (const c of rankCandidates(info.profile, { clipLen: opts.clipLen, duration: info.duration })) {
+      for (const c of rankCandidates(info.profile, { clipLen: opts.clipLen, duration: info.duration, criterion: opts.criterion })) {
         entries.push({ ...c, videoId: v });
       }
     });
-    const top = pickTop(entries, { count: opts.count });
+    const ranked = pickTop(entries, { count: opts.count + RESERVE });
+    const top = ranked.slice(0, opts.count);
+    const extras = ranked.slice(opts.count).map((t) => ({
+      rank: t.rank, start: t.start, end: t.end, peak: t.peak, score: t.score, tag: t.tag,
+      video: names[t.videoId], file: videos[t.videoId].input, audioStreams: infos[t.videoId].audioStreams,
+    }));
     if (top.length === 0) {
       return { folder: null, clips: [], note: 'Ярких моментов с голосом не нашлось. Попробуй режим «Подряд».', analyses: infos };
     }
@@ -150,6 +160,7 @@ async function runBatch({ job, ffmpegPath, ffprobePath, videos, options, onProgr
       meta: { rank: i + 1, tag: t.tag, video: names[t.videoId] },
     }));
     ({ clips } = await cutPlan({ job, ffmpegPath, plan, folder, fast: opts.fast, onProgress: onCut }));
+    extrasOut = extras;
   } else {
     // По видео: у каждого своя папка, а прогресс общий.
     const perVideo = infos.map((info, v) => {
@@ -199,7 +210,24 @@ async function runBatch({ job, ffmpegPath, ffprobePath, videos, options, onProgr
     notes.push(`В ${noSound} ${noSound === 1 ? 'клипе' : 'клипах'} звук пропадает: ${noSound === 1 ? 'он отмечен' : 'они отмечены'} в списке.`);
   }
 
-  return { folder, clips, note: notes.join(' '), analyses: infos };
+  return { folder, clips, extras: extrasOut, note: notes.join(' '), analyses: infos };
+}
+
+/**
+ * Вырезает один из «других моментов» в папку готового топа и дописывает его в timecodes.txt.
+ * Файл получает номер по рейтингу, как и остальные клипы топа.
+ */
+async function cutExtra({ job, ffmpegPath, folder, extra, fast }) {
+  const seg = { start: Number(extra.start), end: Number(extra.end) };
+  if (!(seg.end > seg.start) || seg.end - seg.start > 180) throw new Error('Неверный отрезок');
+  const name = `${pad(extra.rank)}_${safeName(extra.video || path.parse(extra.file).name)}_${clockForFile(seg.start)}.mp4`;
+  const plan = [{ input: extra.file, seg, audioStreams: extra.audioStreams, name, meta: { rank: extra.rank, tag: extra.tag, video: extra.video } }];
+  const { clips } = await cutPlan({ job, ffmpegPath, plan, folder, fast, writeTimecodes: false });
+  const clip = { ...clips[0], index: extra.rank };
+  const mark = { ok: '', partial: '  [звук пропадает]', none: '  [нет звука]' }[clip.audio];
+  const { clock } = require('./cutter');
+  fs.appendFileSync(path.join(folder, 'timecodes.txt'), `${pad(extra.rank)}  ${clock(seg.start)} - ${clock(seg.end)}  ${name}${mark}\n`, 'utf8');
+  return clip;
 }
 
 /** Нарезка одного видео (options.input). Оставлена для простых вызовов и тестов. */
@@ -213,4 +241,4 @@ async function runPipeline({ job, ffmpegPath, ffprobePath, options, analysis, on
   return { ...result, duration: info.duration, audioStreams: info.audioStreams, analysis: info };
 }
 
-module.exports = { runPipeline, runBatch, analyzeVideo, probeMedia, probeDuration, MAX_CLIPS };
+module.exports = { runPipeline, runBatch, cutExtra, analyzeVideo, probeMedia, probeDuration, MAX_CLIPS };

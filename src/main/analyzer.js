@@ -168,6 +168,7 @@ function buildCandidates(profile, { clipLen, duration, preRoll = 0.35 }) {
   const activeSum = prefixSums(active);
   const shareSum = prefixSums(share);
   const diffSum = prefixSums(diff);
+  const voiceSum = prefixSums(voice);
 
   const sorted = Array.from(diff).sort((a, b) => a - b);
   const mid = median(sorted);
@@ -185,9 +186,15 @@ function buildCandidates(profile, { clipLen, duration, preRoll = 0.35 }) {
     const to = Math.min(n, Math.ceil(end));
     const len = Math.max(1, to - from);
     const tail = Math.min(n, i + 8);
+    // «Неожиданность»: насколько голос громче, чем был за 12–3 секунды до пика.
+    const pf = Math.max(0, i - 12);
+    const pt = Math.max(pf + 1, i - 3);
+    const before = (voiceSum[pt] - voiceSum[pf]) / (pt - pf);
     candidates.push({
       peak: i,
       spike,
+      jump: smooth[i] - before,
+      meanDiff: (diffSum[to] - diffSum[from]) / len,
       sustain: Math.max(0, (diffSum[tail] - diffSum[i]) / Math.max(1, tail - i)),
       start,
       end,
@@ -243,27 +250,68 @@ function findHighlights(profile, { clipLen, count, duration, preRoll = 0.35 }) {
 }
 
 /**
+ * По чему искать лучшие моменты. Все критерии работают по голосу и сравнимы между видео,
+ * потому что измеряются в «типичных разбросах» голоса этой записи.
+ */
+const CRITERIA = {
+  mix: 'Сбалансированно',
+  peak: 'Самый громкий всплеск',
+  sustain: 'Долгая реакция',
+  talk: 'Оживлённый разговор',
+  surprise: 'Внезапность',
+};
+
+/**
  * Режим «лучшие»: оцениваем кандидатов одним числом, чтобы сравнивать их между собой
  * и между разными видео.
  *
- * Оценка = (0.6 * резкость подъёма + 0.4 * затяжность) * поправка на речь и музыку,
- * где резкость и затяжность измерены в «типичных разбросах» голоса этой записи (z, не выше 6).
+ * criterion (по умолчанию 'mix'):
+ *   mix       (0.6 * резкость подъёма + 0.4 * затяжность): крик, смех и эмоции вперемешку;
+ *   peak      только резкость: самый громкий всплеск голоса;
+ *   sustain   в основном затяжность: смех и долгая эмоциональная реакция;
+ *   talk      плотная речь без пауз, где голос весь клип выше обычного: оживлённый разговор;
+ *   surprise  скачок голоса после спокойного участка: внезапная реакция.
  * Поправка снижает оценку там, где речи мало или голос тонет в музыке.
  * Веса стартовые и выбраны по результатам исследования других сервисов, а не обучены
  * на разметке: настоящих формул никто из них не публикует.
  */
-function rankCandidates(profile, { clipLen, duration, preRoll = 0.35 }) {
+function rankCandidates(profile, { clipLen, duration, preRoll = 0.35, criterion = 'mix' }) {
   const { candidates, sigma } = buildCandidates(profile, { clipLen, duration, preRoll });
   const out = [];
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   for (const c of candidates) {
-    const spikeZ = Math.min(6, c.spike / sigma);
-    const sustainZ = Math.min(6, c.sustain / sigma);
-    if (c.spike < 3 || spikeZ < 2 || c.activeFrac < 0.6) continue;
+    const spikeZ = clamp(c.spike / sigma, 0, 6);
+    const sustainZ = clamp(c.sustain / sigma, 0, 6);
+    const jumpZ = clamp(c.jump / sigma, 0, 6);
+    const meanZ = clamp(c.meanDiff / sigma, 0, 4);
     const gate = (0.5 + 0.5 * c.activeFrac) * (1 + c.voiceShare / 40);
-    const score = (0.6 * spikeZ + 0.4 * sustainZ) * gate;
-    let tag = 'громкая речь';
-    if (sustainZ >= 2) tag = 'долгая реакция';
-    else if (spikeZ >= 3.5) tag = 'резкий всплеск голоса';
+    let score;
+    let tag;
+
+    if (criterion === 'sustain') {
+      if (c.spike < 2 || spikeZ < 1.5 || sustainZ < 1.2 || c.activeFrac < 0.6) continue;
+      score = (0.25 * spikeZ + 0.75 * sustainZ) * gate;
+      tag = 'долгая реакция';
+    } else if (criterion === 'talk') {
+      if (c.activeFrac < 0.85 || c.spike <= 0 || meanZ < 0.5) continue;
+      score = (2 * c.activeFrac + meanZ) * gate;
+      tag = 'оживлённый разговор';
+    } else if (criterion === 'surprise') {
+      if (c.spike < 3 || jumpZ < 2.5 || c.activeFrac < 0.5) continue;
+      score = jumpZ * gate;
+      tag = 'внезапный всплеск';
+    } else {
+      if (c.spike < 3 || spikeZ < 2 || c.activeFrac < 0.6) continue;
+      if (criterion === 'peak') {
+        score = spikeZ * gate;
+        tag = 'громкий всплеск';
+      } else {
+        score = (0.6 * spikeZ + 0.4 * sustainZ) * gate;
+        tag = 'громкая речь';
+        if (sustainZ >= 2) tag = 'долгая реакция';
+        else if (spikeZ >= 3.5) tag = 'резкий всплеск голоса';
+      }
+    }
     out.push({
       start: c.start,
       end: c.end,
@@ -316,4 +364,4 @@ function fixedSegments(duration, clipLen) {
   return out;
 }
 
-module.exports = { computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments, rollingMedian, buildAnalysisGraph };
+module.exports = { CRITERIA, computeProfile, findHighlights, rankCandidates, pickTop, fixedSegments, rollingMedian, buildAnalysisGraph };

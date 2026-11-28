@@ -12,6 +12,8 @@ const el = {
   run: $('run'), progress: $('progress'), progressLabel: $('progress-label'), progressPct: $('progress-pct'),
   barWrap: document.querySelector('.progress .bar'), barFill: $('bar-fill'), status: $('status'),
   results: $('results'), resultsTitle: $('results-title'), resultsList: $('results-list'),
+  criterionField: $('criterion-field'), criterion: $('criterion'), criterionHint: $('criterion-hint'),
+  player: $('r-player'), extras: $('extras'), extrasList: $('extras-list'), extrasTitle: $('extras-title'),
   openFolder: $('open-folder'), copyTimes: $('copy-times'),
 };
 
@@ -32,6 +34,13 @@ const MODE_HINTS = {
   top: 'Сам выбирает самые яркие моменты со всех выбранных видео: крик, смех, эмоции в голосе. Лучшие идут первыми',
   smart: 'Берёт все заметные реакции стримера из каждого видео. Музыка и шум игры не считаются',
   fixed: 'Режет каждое видео подряд на равные куски',
+};
+const CRITERION_HINTS = {
+  mix: 'Крик, смех и эмоции вперемешку: подходит почти всегда',
+  peak: 'Самые громкие моменты: резкие крики и вскрики',
+  sustain: 'Долгие реакции: смех и эмоции, которые держатся несколько секунд',
+  talk: 'Оживлённые разговоры: голос весь клип выше обычного, без пауз',
+  surprise: 'Внезапные реакции: голос резко подскакивает после спокойного участка',
 };
 const COUNT = {
   top: { label: 'Сколько лучших клипов', min: 3, max: 100, value: 10 },
@@ -88,6 +97,8 @@ function refresh() {
   const mode = getMode();
   el.modeHint.textContent = MODE_HINTS[mode];
   el.countField.hidden = mode === 'fixed';
+  el.criterionField.hidden = mode !== 'top';
+  el.criterionHint.textContent = CRITERION_HINTS[el.criterion.value];
   el.countOut.textContent = el.count.value;
   el.outPath.textContent = state.outDir;
   el.outPath.title = state.outDir;
@@ -392,7 +403,7 @@ el.run.addEventListener('click', async () => {
   const mode = getMode();
   const res = await api.run(
     picked.map((i) => ({ id: i.id, file: i.file })),
-    { outDir: state.outDir, mode, clipLen: getLen(), count: Number(el.count.value), fast: el.fast.checked }
+    { outDir: state.outDir, mode, criterion: el.criterion.value, clipLen: getLen(), count: Number(el.count.value), fast: el.fast.checked }
   );
 
   state.busy = false;
@@ -413,6 +424,7 @@ const AUDIO_WARN = { partial: 'звук пропадает', none: 'нет зв�
 
 function renderResults(data, multi) {
   state.last = data;
+  state.multi = multi;
   document.dispatchEvent(new CustomEvent('clipper:cut-done', { detail: data.clips.map((c) => c.file) }));
   if (!data.clips.length) {
     setStatus(data.note || 'Клипов нет');
@@ -430,14 +442,79 @@ function renderResults(data, multi) {
         cell('vid', multi && c.video ? c.video : ''),
         cell('tag', c.tag || ''),
         cell('warn', AUDIO_WARN[c.audio] || ''),
-        cell('score', c.score ? `+${c.score} дБ` : '')
+        cell('score', c.score ? `${c.score}` : '')
       );
+      li.append(rowActions(li, c.url, null, { start: 0 }, [button('Смотреть', '', () => play(li, c.url, 0, null))]));
       return li;
     })
   );
+  renderExtras(data);
   el.results.hidden = false;
   const hasWarn = data.clips.some((c) => c.audio !== 'ok');
   setStatus(data.note || 'Клипы сохранены', data.note ? (hasWarn ? 'error' : '') : 'ok');
+}
+
+// ---- Просмотр клипов и «других моментов» прямо в приложении ----
+
+let playTimer = null;
+function play(li, url, from, to) {
+  document.querySelectorAll('.results-list li.playing').forEach((n) => n.classList.remove('playing'));
+  li.classList.add('playing');
+  el.player.hidden = false;
+  el.player.onloadedmetadata = () => {
+    el.player.currentTime = from;
+    el.player.play().catch(() => {});
+  };
+  el.player.ontimeupdate = () => {
+    if (to !== null && el.player.currentTime >= to) { el.player.pause(); el.player.ontimeupdate = null; }
+  };
+  if (el.player.getAttribute('src') === url) el.player.onloadedmetadata();
+  else el.player.src = url;
+  el.player.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function rowActions(li, url, _x, _y, buttons) {
+  const box = document.createElement('div');
+  box.className = 'row-actions';
+  box.append(...buttons);
+  return box;
+}
+
+function renderExtras(data) {
+  const extras = data.extras || [];
+  el.extras.hidden = extras.length === 0;
+  el.extrasList.replaceChildren(
+    ...extras.map((e, i) => {
+      const li = document.createElement('li');
+      li.style.setProperty('--i', Math.min(i, 12));
+      li.append(
+        cell('idx num', String(e.rank).padStart(2, '0')),
+        cell('time', `${clock(e.start)} – ${clock(e.end)}`),
+        cell('vid', state.multi ? e.video || '' : ''),
+        cell('tag', e.tag || ''),
+        cell('score', e.score ? `${e.score}` : '')
+      );
+      const cut = button('Вырезать', '', async () => {
+        cut.disabled = true;
+        cut.textContent = 'Режу…';
+        const res = await api.cutExtra(data.folder, e, el.fast.checked);
+        if (!res.ok) {
+          cut.disabled = false;
+          cut.textContent = 'Вырезать';
+          setStatus(res.error, 'error');
+          return;
+        }
+        // Вырезанный момент переезжает из «других» в список клипов.
+        data.clips.push({ ...res.data, video: e.video });
+        data.clips.sort((x, y) => (x.rank || x.index) - (y.rank || y.index));
+        data.extras = data.extras.filter((x) => x !== e);
+        renderResults(data, state.multi);
+        setStatus(`Клип ${String(e.rank).padStart(2, '0')} вырезан в папку`, 'ok');
+      });
+      li.append(rowActions(li, e.url, null, null, [button('Смотреть', '', () => play(li, e.url, e.start, e.end)), cut]));
+      return li;
+    })
+  );
 }
 
 function cell(cls, text) {
@@ -484,6 +561,7 @@ function applyCountMode() {
 document.querySelectorAll('input[name="mode"]').forEach((i) => i.addEventListener('change', () => { applyCountMode(); refresh(); }));
 document.querySelectorAll('input[name="len"]').forEach((i) => i.addEventListener('change', refresh));
 el.count.addEventListener('input', refresh);
+el.criterion.addEventListener('change', refresh);
 
 (async function init() {
   const d = await api.defaults();

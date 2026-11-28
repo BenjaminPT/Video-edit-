@@ -304,3 +304,14 @@ fieldset > .field-label:not(:first-child) { display: block; margin-top: 14px; }
 #m-ov-box[hidden], #m-ov-chroma-box[hidden], #m-ov-clear[hidden], #m-h265-wrap[hidden], #m-hw-wrap[hidden] { display: none; }
 #m-h265-wrap, #m-hw-wrap { margin-top: 14px; }
 @media (max-width: 520px) { .render-grid { grid-template-columns: 1fr; } }
+
+.extras { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
+.extras h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.results-list li .row-actions { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.results-list li .btn { min-height: 32px; padding: 0 12px; }
+.results-list li.playing { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+#r-player { margin-bottom: 12px; }
+#r-player[hidden], .extras[hidden], #criterion-field[hidden] { display: none; }
+.results-list li { flex-wrap: wrap; }
+.results-list .idx { flex-shrink: 0; }
+.results-list .time { white-space: nowrap; }
